@@ -1,10 +1,12 @@
 import os
+import re
+import io
 import uuid
 import hmac
 import hashlib
 import time
 from pathlib import Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from typing import Optional, List
 
 from dotenv import load_dotenv
@@ -12,6 +14,7 @@ load_dotenv(Path(__file__).parent / ".env")
 
 from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from motor.motor_asyncio import AsyncIOMotorClient
 
@@ -86,6 +89,17 @@ class ItemPayload(BaseModel):
     category: Optional[str] = None
     current_stock: float = 0
     min_stock: float = 0
+    photo: Optional[str] = None
+
+
+class StockInPayload(BaseModel):
+    item_id: Optional[str] = None
+    name: Optional[str] = None
+    barcode: Optional[str] = None
+    unit: str = "pcs"
+    qty: float
+    photo: Optional[str] = None
+    note: Optional[str] = None
 
 
 class BonItemLine(BaseModel):
@@ -276,6 +290,66 @@ async def admin_delete_item(item_id: str, _: bool = Depends(require_admin)):
     return {"ok": True}
 
 
+# ---------------- Admin: persediaan (barang masuk & riwayat) ----------------
+
+@api_router.post("/admin/items/stock-in")
+async def admin_stock_in(payload: StockInPayload, _: bool = Depends(require_admin)):
+    if payload.qty <= 0:
+        raise HTTPException(status_code=400, detail="Jumlah harus lebih dari 0")
+
+    item = None
+    if payload.item_id:
+        item = await db.items.find_one({"id": payload.item_id})
+        if not item:
+            raise HTTPException(status_code=404, detail="Barang tidak ditemukan")
+    elif payload.name:
+        item = await db.items.find_one({"name": {"$regex": f"^{re.escape(payload.name.strip())}$", "$options": "i"}})
+        if not item:
+            barcode = (payload.barcode or "").strip() or f"AUTO-{new_id()[:8].upper()}"
+            if await db.items.find_one({"barcode": barcode}):
+                barcode = f"AUTO-{new_id()[:8].upper()}"
+            item = {
+                "id": new_id(),
+                "name": payload.name.strip(),
+                "barcode": barcode,
+                "unit": payload.unit or "pcs",
+                "category": None,
+                "current_stock": 0,
+                "min_stock": 0,
+                "photo": payload.photo,
+                "created_at": now_iso(),
+            }
+            await db.items.insert_one(dict(item))
+    else:
+        raise HTTPException(status_code=400, detail="Pilih barang yang sudah ada atau isi nama barang baru")
+
+    await db.items.update_one({"id": item["id"]}, {"$inc": {"current_stock": payload.qty}})
+
+    tx = {
+        "id": new_id(),
+        "item_id": item["id"],
+        "item_name": item["name"],
+        "type": "masuk",
+        "qty": payload.qty,
+        "unit": payload.unit or item.get("unit", "pcs"),
+        "photo": payload.photo,
+        "note": payload.note,
+        "created_at": now_iso(),
+    }
+    await db.item_transactions.insert_one(tx)
+    tx.pop("_id", None)
+    return tx
+
+
+@api_router.get("/admin/item-transactions")
+async def admin_list_item_transactions(item_id: Optional[str] = None, _: bool = Depends(require_admin)):
+    q = {}
+    if item_id:
+        q["item_id"] = item_id
+    txs = await db.item_transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return txs
+
+
 # ---------------- Admin: bon requests ----------------
 
 @api_router.get("/admin/bon")
@@ -307,6 +381,17 @@ async def admin_approve_bon(bon_id: str, _: bool = Depends(require_admin)):
             {"id": line["item_id"]},
             {"$inc": {"current_stock": -line["qty"]}},
         )
+        await db.item_transactions.insert_one({
+            "id": new_id(),
+            "item_id": line["item_id"],
+            "item_name": line["item_name"],
+            "type": "keluar",
+            "qty": line["qty"],
+            "unit": line.get("unit", "pcs"),
+            "photo": None,
+            "note": f"Bon: {bon['requester_name']} - {bon['room']}",
+            "created_at": now_iso(),
+        })
 
     await db.bon_requests.update_one(
         {"id": bon_id},
@@ -381,6 +466,174 @@ async def admin_list_medicine_transactions(medicine_id: Optional[str] = None, _:
     return items
 
 
+# ---------------- Admin: laporan persediaan (export) ----------------
+
+def fmt_num(n):
+    try:
+        return f"{float(n):,.0f}".replace(",", ".")
+    except Exception:
+        return str(n)
+
+
+def parse_date_range(start: Optional[str], end: Optional[str]):
+    start_dt = None
+    end_dt = None
+    if start:
+        start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+    if end:
+        end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc) + timedelta(days=1)
+    return start_dt, end_dt
+
+
+def build_pdf_report(rows, title_label, period_label):
+    from reportlab.lib.pagesizes import A4
+    from reportlab.lib import colors
+    from reportlab.lib.units import cm
+    from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer
+    from reportlab.lib.styles import getSampleStyleSheet
+
+    buf = io.BytesIO()
+    doc = SimpleDocTemplate(buf, pagesize=A4, topMargin=1.5 * cm, bottomMargin=1.5 * cm,
+                             leftMargin=1.5 * cm, rightMargin=1.5 * cm)
+    styles = getSampleStyleSheet()
+    elements = [
+        Paragraph("<b>Laporan Persediaan</b>", styles["Title"]),
+        Paragraph(f"Modul: {title_label}", styles["Normal"]),
+        Paragraph(f"Periode: {period_label}", styles["Normal"]),
+        Paragraph(f"Dicetak: {now_iso()[:19].replace('T', ' ')} UTC", styles["Normal"]),
+        Spacer(1, 14),
+    ]
+
+    data = [["No", "Nama Barang", "Satuan", "Total Masuk", "Total Keluar", "Saldo Akhir"]]
+    for i, r in enumerate(rows, 1):
+        data.append([str(i), r["name"], r["unit"], fmt_num(r["masuk"]), fmt_num(r["keluar"]), fmt_num(r["saldo"])])
+    if len(data) == 1:
+        data.append(["-", "Tidak ada data", "-", "-", "-", "-"])
+
+    table = Table(data, repeatRows=1, colWidths=[1.3 * cm, 6.5 * cm, 2 * cm, 3 * cm, 3 * cm, 3 * cm])
+    table.setStyle(TableStyle([
+        ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#171717")),
+        ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
+        ("FONTNAME", (0, 0), (-1, 0), "Helvetica-Bold"),
+        ("FONTSIZE", (0, 0), (-1, -1), 8),
+        ("GRID", (0, 0), (-1, -1), 0.5, colors.HexColor("#d4d4d4")),
+        ("ROWBACKGROUNDS", (0, 1), (-1, -1), [colors.white, colors.HexColor("#fafafa")]),
+        ("ALIGN", (3, 1), (-1, -1), "RIGHT"),
+        ("VALIGN", (0, 0), (-1, -1), "MIDDLE"),
+    ]))
+    elements.append(table)
+    doc.build(elements)
+    buf.seek(0)
+    filename = f"laporan-persediaan-{title_label.lower().replace(' ', '-')}.pdf"
+    return StreamingResponse(buf, media_type="application/pdf",
+                              headers={"Content-Disposition": f'attachment; filename="{filename}"'})
+
+
+def build_xlsx_report(rows, title_label, period_label):
+    from openpyxl import Workbook
+    from openpyxl.styles import Font, PatternFill, Alignment
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "Laporan Persediaan"
+
+    ws.merge_cells("A1:F1")
+    ws["A1"] = f"Laporan Persediaan — {title_label}"
+    ws["A1"].font = Font(bold=True, size=14)
+
+    ws.merge_cells("A2:F2")
+    ws["A2"] = f"Periode: {period_label}"
+
+    ws.append([])
+    headers = ["No", "Nama Barang", "Satuan", "Total Masuk", "Total Keluar", "Saldo Akhir"]
+    ws.append(headers)
+    header_row = ws.max_row
+    for col in range(1, 7):
+        c = ws.cell(row=header_row, column=col)
+        c.font = Font(bold=True, color="FFFFFF")
+        c.fill = PatternFill("solid", fgColor="171717")
+        c.alignment = Alignment(horizontal="center")
+
+    for i, r in enumerate(rows, 1):
+        ws.append([i, r["name"], r["unit"], r["masuk"], r["keluar"], r["saldo"]])
+
+    widths = [6, 36, 10, 14, 14, 14]
+    for i, w in enumerate(widths, 1):
+        ws.column_dimensions[chr(64 + i)].width = w
+
+    buf = io.BytesIO()
+    wb.save(buf)
+    buf.seek(0)
+    filename = f"laporan-persediaan-{title_label.lower().replace(' ', '-')}.xlsx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@api_router.get("/admin/report")
+async def admin_report(
+    module: str = "items",
+    start: Optional[str] = None,
+    end: Optional[str] = None,
+    format: str = "pdf",
+    _: bool = Depends(require_admin),
+):
+    if module not in ("items", "medicines"):
+        raise HTTPException(status_code=400, detail="Modul tidak valid")
+    if format not in ("pdf", "xlsx"):
+        raise HTTPException(status_code=400, detail="Format tidak valid")
+
+    start_dt, end_dt = parse_date_range(start, end)
+
+    if module == "items":
+        master = await db.items.find({}, {"_id": 0}).sort("name", 1).to_list(2000)
+        txs = await db.item_transactions.find({}, {"_id": 0}).to_list(20000)
+        title_label = "Barang Gudang"
+        key_field = "item_id"
+    else:
+        master = await db.medicines.find({}, {"_id": 0}).sort("name", 1).to_list(2000)
+        txs = await db.medicine_transactions.find({}, {"_id": 0}).to_list(20000)
+        title_label = "Obat Klinik"
+        key_field = "medicine_id"
+
+    totals = {}
+    for tx in txs:
+        try:
+            ts = datetime.fromisoformat(tx["created_at"])
+        except Exception:
+            continue
+        if start_dt and ts < start_dt:
+            continue
+        if end_dt and ts >= end_dt:
+            continue
+        key = tx.get(key_field)
+        if key not in totals:
+            totals[key] = {"masuk": 0.0, "keluar": 0.0}
+        if tx.get("type") == "masuk":
+            totals[key]["masuk"] += tx.get("qty", 0)
+        elif tx.get("type") == "keluar":
+            totals[key]["keluar"] += tx.get("qty", 0)
+
+    rows = []
+    for m in master:
+        t = totals.get(m["id"], {"masuk": 0.0, "keluar": 0.0})
+        rows.append({
+            "name": m["name"],
+            "unit": m.get("unit", "pcs"),
+            "masuk": t["masuk"],
+            "keluar": t["keluar"],
+            "saldo": m.get("current_stock", 0),
+        })
+
+    period_label = f"{start or '-'} s/d {end or '-'}"
+
+    if format == "xlsx":
+        return build_xlsx_report(rows, title_label, period_label)
+    return build_pdf_report(rows, title_label, period_label)
+
+
 # ---------------- Admin: stats ----------------
 
 @api_router.get("/admin/stats")
@@ -415,6 +668,8 @@ async def startup():
     await db.bon_requests.create_index("status")
     await db.medicine_transactions.create_index("id", unique=True)
     await db.medicine_transactions.create_index("medicine_id")
+    await db.item_transactions.create_index("id", unique=True)
+    await db.item_transactions.create_index("item_id")
 
 
 app.include_router(api_router)
