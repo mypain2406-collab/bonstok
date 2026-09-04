@@ -1,0 +1,930 @@
+const { useState, useEffect, useCallback, useRef } = React;
+
+const API_BASE = window.API_BASE;
+
+function fmtNum(n) {
+  if (n === null || n === undefined || !isFinite(n)) return "-";
+  return Number(n).toLocaleString("id-ID");
+}
+
+function fmtDate(iso) {
+  if (!iso) return "-";
+  try {
+    return new Date(iso).toLocaleString("id-ID", { dateStyle: "medium", timeStyle: "short" });
+  } catch (e) {
+    return iso;
+  }
+}
+
+function useHashRoute() {
+  const [hash, setHash] = useState(window.location.hash || "#/");
+  useEffect(() => {
+    const onChange = () => setHash(window.location.hash || "#/");
+    window.addEventListener("hashchange", onChange);
+    return () => window.removeEventListener("hashchange", onChange);
+  }, []);
+  return hash;
+}
+
+function Header() {
+  return (
+    <header className="border-b border-neutral-200 bg-white sticky top-0 z-20">
+      <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between flex-wrap gap-3">
+        <a href="#/" className="flex items-center gap-2">
+          <span className="text-2xl font-black tracking-tight">BonStok</span>
+        </a>
+        <nav className="flex gap-1 flex-wrap text-sm font-medium">
+          <a href="#/gudang" className="px-3 py-1.5 rounded-lg hover:bg-neutral-100">Gudang</a>
+          <a href="#/klinik" className="px-3 py-1.5 rounded-lg hover:bg-neutral-100">Klinik</a>
+          <a href="#/admin" className="px-3 py-1.5 rounded-lg hover:bg-neutral-100">Admin</a>
+        </nav>
+      </div>
+    </header>
+  );
+}
+
+const inputCls = "w-full rounded-lg border border-neutral-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-neutral-900";
+
+function Field({ label, children }) {
+  return (
+    <div>
+      <label className="block text-xs font-bold uppercase tracking-widest text-neutral-500 mb-1.5">{label}</label>
+      {children}
+    </div>
+  );
+}
+
+function Card({ children, className }) {
+  return <div className={"bg-white border border-neutral-200 rounded-2xl p-5 sm:p-6 " + (className || "")}>{children}</div>;
+}
+
+function Toast({ message, type, onClose }) {
+  if (!message) return null;
+  const color = type === "error" ? "bg-red-600" : "bg-neutral-900";
+  return (
+    <div className={`fixed bottom-5 left-1/2 -translate-x-1/2 ${color} text-white text-sm font-medium px-4 py-2.5 rounded-lg shadow-lg z-50 max-w-[90vw]`}
+      onClick={onClose}>
+      {message}
+    </div>
+  );
+}
+
+function useToast() {
+  const [toast, setToast] = useState(null);
+  const show = (message, type = "info") => {
+    setToast({ message, type });
+    setTimeout(() => setToast(null), 3500);
+  };
+  return [toast, show];
+}
+
+// ---------------- Home ----------------
+
+function Home() {
+  return (
+    <div className="max-w-4xl mx-auto px-4 py-16">
+      <div className="text-center max-w-xl mx-auto">
+        <div className="text-xs font-bold uppercase tracking-[0.3em] text-neutral-500">Bon &amp; Stok</div>
+        <h1 className="text-4xl font-black tracking-tight mt-3">Ambil barang, catat stok, tanpa repot.</h1>
+        <p className="text-neutral-600 mt-4">
+          Scan barcode untuk bon barang gudang, catat keluar-masuk obat klinik, dan pantau semuanya dari satu dashboard admin.
+        </p>
+      </div>
+      <div className="grid sm:grid-cols-3 gap-4 mt-12">
+        <a href="#/gudang" className="border border-neutral-200 rounded-2xl p-6 bg-white hover:border-neutral-900 hover:shadow-md transition-all">
+          <div className="text-3xl">📦</div>
+          <div className="font-bold text-lg mt-3">Ambil Barang Gudang</div>
+          <div className="text-sm text-neutral-500 mt-1">Scan barcode, ajukan bon.</div>
+        </a>
+        <a href="#/klinik" className="border border-neutral-200 rounded-2xl p-6 bg-white hover:border-neutral-900 hover:shadow-md transition-all">
+          <div className="text-3xl">💊</div>
+          <div className="font-bold text-lg mt-3">Stok Obat Klinik</div>
+          <div className="text-sm text-neutral-500 mt-1">Catat obat masuk / keluar.</div>
+        </a>
+        <a href="#/admin" className="border border-neutral-200 rounded-2xl p-6 bg-white hover:border-neutral-900 hover:shadow-md transition-all">
+          <div className="text-3xl">🔐</div>
+          <div className="font-bold text-lg mt-3">Admin</div>
+          <div className="text-sm text-neutral-500 mt-1">Kelola barang, approval bon.</div>
+        </a>
+      </div>
+    </div>
+  );
+}
+
+// ---------------- Barcode scanner modal (camera) ----------------
+
+function ScannerModal({ onDetected, onClose }) {
+  const readerRef = useRef(null);
+  const [error, setError] = useState("");
+
+  useEffect(() => {
+    let scanner = null;
+    let stopped = false;
+    try {
+      scanner = new Html5Qrcode("bonstok-reader");
+      scanner.start(
+        { facingMode: "environment" },
+        { fps: 10, qrbox: { width: 250, height: 150 } },
+        (decodedText) => {
+          if (stopped) return;
+          stopped = true;
+          scanner.stop().then(() => scanner.clear()).catch(() => {});
+          onDetected(decodedText);
+        },
+        () => {}
+      ).catch((err) => setError("Tidak bisa mengakses kamera: " + err));
+    } catch (err) {
+      setError("Kamera tidak tersedia di perangkat ini.");
+    }
+    return () => {
+      if (scanner && !stopped) {
+        scanner.stop().then(() => scanner.clear()).catch(() => {});
+      }
+    };
+  }, []);
+
+  return (
+    <div className="fixed inset-0 bg-black/70 flex items-center justify-center p-4 z-40" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-5 max-w-sm w-full" onClick={(e) => e.stopPropagation()}>
+        <div className="flex items-center justify-between mb-3">
+          <div className="font-bold">Scan Barcode</div>
+          <button onClick={onClose} className="text-neutral-400 hover:text-neutral-900 text-sm font-bold">Tutup</button>
+        </div>
+        <div id="bonstok-reader" ref={readerRef}></div>
+        {error && <div className="text-red-600 text-xs mt-3">{error}</div>}
+        <div className="text-xs text-neutral-500 mt-3">Arahkan kamera ke barcode barang.</div>
+      </div>
+    </div>
+  );
+}
+
+// ---------------- Gudang (warehouse bon) ----------------
+
+function GudangPage() {
+  const [toast, showToast] = useToast();
+  const [requesterName, setRequesterName] = useState("");
+  const [room, setRoom] = useState("");
+  const [barcodeInput, setBarcodeInput] = useState("");
+  const [cart, setCart] = useState([]); // [{item_id, name, barcode, unit, qty, current_stock}]
+  const [showScanner, setShowScanner] = useState(false);
+  const [searchResults, setSearchResults] = useState([]);
+  const [searching, setSearching] = useState(false);
+  const [submitting, setSubmitting] = useState(false);
+  const barcodeFieldRef = useRef(null);
+
+  const lookupBarcode = async (code) => {
+    if (!code) return;
+    try {
+      const r = await fetch(`${API_BASE}/items/by-barcode/${encodeURIComponent(code)}`);
+      if (!r.ok) {
+        showToast("Barang dengan barcode itu tidak ditemukan", "error");
+        return;
+      }
+      const item = await r.json();
+      addToCart(item);
+      showToast(`${item.name} ditambahkan ke keranjang`);
+    } catch (err) {
+      showToast("Gagal mencari barang", "error");
+    }
+  };
+
+  const addToCart = (item) => {
+    setCart((prev) => {
+      const existing = prev.find((c) => c.item_id === item.id);
+      if (existing) {
+        return prev.map((c) => (c.item_id === item.id ? { ...c, qty: c.qty + 1 } : c));
+      }
+      return [...prev, { item_id: item.id, name: item.name, barcode: item.barcode, unit: item.unit, qty: 1, current_stock: item.current_stock }];
+    });
+  };
+
+  const onBarcodeSubmit = (e) => {
+    e.preventDefault();
+    lookupBarcode(barcodeInput.trim());
+    setBarcodeInput("");
+  };
+
+  const doSearch = async (q) => {
+    if (!q) {
+      setSearchResults([]);
+      return;
+    }
+    setSearching(true);
+    try {
+      const r = await fetch(`${API_BASE}/items?search=${encodeURIComponent(q)}`);
+      const data = await r.json();
+      setSearchResults(data);
+    } catch (err) {
+      setSearchResults([]);
+    } finally {
+      setSearching(false);
+    }
+  };
+
+  const updateQty = (item_id, qty) => {
+    setCart((prev) => prev.map((c) => (c.item_id === item_id ? { ...c, qty: Math.max(1, qty) } : c)));
+  };
+
+  const removeFromCart = (item_id) => {
+    setCart((prev) => prev.filter((c) => c.item_id !== item_id));
+  };
+
+  const submitBon = async () => {
+    if (!requesterName.trim() || !room.trim()) {
+      showToast("Isi nama dan ruangan dulu", "error");
+      return;
+    }
+    if (cart.length === 0) {
+      showToast("Keranjang masih kosong", "error");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const r = await fetch(`${API_BASE}/bon`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          requester_name: requesterName,
+          room,
+          items: cart.map((c) => ({ item_id: c.item_id, qty: c.qty })),
+        }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || "Gagal mengajukan bon");
+      }
+      showToast("Bon berhasil diajukan, menunggu persetujuan admin.");
+      setCart([]);
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 py-10">
+      <div className="text-xs font-bold uppercase tracking-[0.3em] text-neutral-500">📦 Gudang</div>
+      <h1 className="text-3xl font-black tracking-tight mt-2">Ajukan Bon Barang</h1>
+      <p className="text-neutral-600 mt-2">Isi identitas, scan barcode barang yang mau diambil, lalu ajukan bon untuk disetujui admin.</p>
+
+      <div className="grid lg:grid-cols-2 gap-6 mt-8">
+        <div className="space-y-4">
+          <Card>
+            <div className="space-y-4">
+              <Field label="Nama Peminta">
+                <input className={inputCls} value={requesterName} onChange={(e) => setRequesterName(e.target.value)} placeholder="Nama Anda" />
+              </Field>
+              <Field label="Ruangan / Unit Kerja">
+                <input className={inputCls} value={room} onChange={(e) => setRoom(e.target.value)} placeholder="Contoh: Ruang Administrasi" />
+              </Field>
+            </div>
+          </Card>
+
+          <Card>
+            <Field label="Scan / Ketik Barcode Barang">
+              <form onSubmit={onBarcodeSubmit} className="flex gap-2">
+                <input
+                  ref={barcodeFieldRef}
+                  className={inputCls}
+                  value={barcodeInput}
+                  onChange={(e) => setBarcodeInput(e.target.value)}
+                  placeholder="Scan pakai alat, atau ketik manual lalu Enter"
+                  autoFocus
+                />
+                <button type="submit" className="bg-neutral-900 text-white text-xs font-bold uppercase px-4 rounded-lg whitespace-nowrap">Cari</button>
+              </form>
+            </Field>
+            <button
+              onClick={() => setShowScanner(true)}
+              className="mt-3 w-full border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase tracking-wider hover:bg-neutral-50"
+            >
+              📷 Scan Pakai Kamera
+            </button>
+            <div className="mt-4">
+              <Field label="Atau cari nama barang">
+                <input
+                  className={inputCls}
+                  placeholder="Ketik nama barang..."
+                  onChange={(e) => doSearch(e.target.value)}
+                />
+              </Field>
+              {searching && <div className="text-xs text-neutral-400 mt-2">Mencari...</div>}
+              {searchResults.length > 0 && (
+                <div className="mt-2 border border-neutral-200 rounded-lg divide-y divide-neutral-100 max-h-52 overflow-y-auto">
+                  {searchResults.map((it) => (
+                    <button
+                      key={it.id}
+                      onClick={() => { addToCart(it); showToast(`${it.name} ditambahkan`); }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 flex justify-between items-center"
+                    >
+                      <span>{it.name}</span>
+                      <span className="text-xs text-neutral-400">Stok {fmtNum(it.current_stock)} {it.unit}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </Card>
+        </div>
+
+        <Card>
+          <div className="font-bold mb-3">Keranjang Bon ({cart.length})</div>
+          {cart.length === 0 && <div className="text-sm text-neutral-400">Belum ada barang. Scan barcode untuk menambahkan.</div>}
+          <div className="space-y-3">
+            {cart.map((c) => (
+              <div key={c.item_id} className="flex items-center gap-3 border-b border-neutral-100 pb-3 last:border-0">
+                <div className="flex-1">
+                  <div className="text-sm font-semibold">{c.name}</div>
+                  <div className="text-xs text-neutral-400">Stok tersedia: {fmtNum(c.current_stock)} {c.unit}</div>
+                </div>
+                <input
+                  type="number"
+                  min="1"
+                  value={c.qty}
+                  onChange={(e) => updateQty(c.item_id, Number(e.target.value))}
+                  className="w-16 rounded-lg border border-neutral-300 px-2 py-1 text-sm text-center"
+                />
+                <button onClick={() => removeFromCart(c.item_id)} className="text-red-600 text-xs font-bold uppercase">Hapus</button>
+              </div>
+            ))}
+          </div>
+          <button
+            onClick={submitBon}
+            disabled={submitting}
+            className="mt-5 w-full bg-neutral-900 text-white font-bold text-sm uppercase tracking-widest py-2.5 rounded-lg hover:bg-neutral-700 disabled:opacity-50"
+          >
+            {submitting ? "Mengirim..." : "Ajukan Bon"}
+          </button>
+        </Card>
+      </div>
+
+      {showScanner && (
+        <ScannerModal
+          onClose={() => setShowScanner(false)}
+          onDetected={(code) => { setShowScanner(false); lookupBarcode(code); }}
+        />
+      )}
+      <Toast message={toast && toast.message} type={toast && toast.type} onClose={() => {}} />
+    </div>
+  );
+}
+
+// ---------------- Klinik (medicine stock) ----------------
+
+function KlinikPage() {
+  const [toast, showToast] = useToast();
+  const [medicines, setMedicines] = useState([]);
+  const [nurseName, setNurseName] = useState("");
+  const [medicineId, setMedicineId] = useState("");
+  const [type, setType] = useState("keluar");
+  const [qty, setQty] = useState(1);
+  const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const load = useCallback(async () => {
+    const r = await fetch(`${API_BASE}/medicines`);
+    const data = await r.json();
+    setMedicines(data);
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  const submit = async (e) => {
+    e.preventDefault();
+    if (!nurseName.trim() || !medicineId) {
+      showToast("Isi nama perawat dan pilih obat dulu", "error");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const r = await fetch(`${API_BASE}/medicine-transactions`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ medicine_id: medicineId, type, qty: Number(qty), nurse_name: nurseName, note }),
+      });
+      if (!r.ok) {
+        const err = await r.json().catch(() => ({}));
+        throw new Error(err.detail || "Gagal mencatat transaksi");
+      }
+      showToast("Stok obat berhasil diperbarui.");
+      setQty(1);
+      setNote("");
+      load();
+    } catch (err) {
+      showToast(err.message, "error");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="max-w-4xl mx-auto px-4 py-10">
+      <div className="text-xs font-bold uppercase tracking-[0.3em] text-neutral-500">💊 Klinik</div>
+      <h1 className="text-3xl font-black tracking-tight mt-2">Stok Obat Klinik</h1>
+      <p className="text-neutral-600 mt-2">Catat obat masuk (diterima) atau keluar (dipakai/diberikan) — stok terupdate langsung.</p>
+
+      <div className="grid lg:grid-cols-2 gap-6 mt-8">
+        <Card>
+          <form onSubmit={submit} className="space-y-4">
+            <Field label="Nama Perawat">
+              <input className={inputCls} value={nurseName} onChange={(e) => setNurseName(e.target.value)} placeholder="Nama Anda" />
+            </Field>
+            <Field label="Obat">
+              <select className={inputCls} value={medicineId} onChange={(e) => setMedicineId(e.target.value)}>
+                <option value="">-- Pilih obat --</option>
+                {medicines.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name} (stok: {fmtNum(m.current_stock)} {m.unit})</option>
+                ))}
+              </select>
+            </Field>
+            <Field label="Jenis Transaksi">
+              <div className="flex gap-2">
+                <button type="button" onClick={() => setType("masuk")}
+                  className={`flex-1 py-2 rounded-lg text-sm font-bold uppercase border ${type === "masuk" ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300"}`}>
+                  Masuk
+                </button>
+                <button type="button" onClick={() => setType("keluar")}
+                  className={`flex-1 py-2 rounded-lg text-sm font-bold uppercase border ${type === "keluar" ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300"}`}>
+                  Keluar
+                </button>
+              </div>
+            </Field>
+            <Field label="Jumlah">
+              <input type="number" min="1" className={inputCls} value={qty} onChange={(e) => setQty(e.target.value)} />
+            </Field>
+            <Field label="Catatan (opsional)">
+              <input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Contoh: diberikan ke pasien / diterima dari supplier" />
+            </Field>
+            <button disabled={submitting} className="w-full bg-neutral-900 text-white font-bold text-sm uppercase tracking-widest py-2.5 rounded-lg hover:bg-neutral-700 disabled:opacity-50">
+              {submitting ? "Menyimpan..." : "Simpan"}
+            </button>
+          </form>
+        </Card>
+
+        <Card>
+          <div className="font-bold mb-3">Stok Obat Saat Ini</div>
+          <div className="space-y-2 max-h-[420px] overflow-y-auto">
+            {medicines.map((m) => (
+              <div key={m.id} className="flex justify-between items-center border-b border-neutral-100 pb-2 last:border-0">
+                <div>
+                  <div className="text-sm font-semibold">{m.name}</div>
+                  {m.category && <div className="text-xs text-neutral-400">{m.category}</div>}
+                </div>
+                <div className={`text-sm font-bold ${m.current_stock <= m.min_stock ? "text-red-600" : "text-neutral-800"}`}>
+                  {fmtNum(m.current_stock)} {m.unit}
+                </div>
+              </div>
+            ))}
+            {medicines.length === 0 && <div className="text-sm text-neutral-400">Belum ada data obat.</div>}
+          </div>
+        </Card>
+      </div>
+      <Toast message={toast && toast.message} type={toast && toast.type} onClose={() => {}} />
+    </div>
+  );
+}
+
+// ---------------- Admin ----------------
+
+function useAdminToken() {
+  const [token, setToken] = useState(localStorage.getItem("bonstok_admin_token") || "");
+  const save = (t) => { localStorage.setItem("bonstok_admin_token", t); setToken(t); };
+  const clear = () => { localStorage.removeItem("bonstok_admin_token"); setToken(""); };
+  return [token, save, clear];
+}
+
+function AdminLogin({ onLogin }) {
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const r = await fetch(`${API_BASE}/admin/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!r.ok) throw new Error("Password salah");
+      const data = await r.json();
+      onLogin(data.token);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="max-w-sm mx-auto px-4 py-24">
+      <h1 className="text-2xl font-black">Admin BonStok</h1>
+      <form onSubmit={submit} className="mt-6 space-y-4">
+        <Field label="Password">
+          <input type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
+        </Field>
+        {error && <div className="text-red-600 text-sm">{error}</div>}
+        <button disabled={busy} className="w-full bg-neutral-900 text-white font-bold text-sm uppercase tracking-widest py-2.5 rounded-lg hover:bg-neutral-700 disabled:opacity-50">
+          {busy ? "Memproses..." : "Masuk"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function StatCard({ label, value, alert }) {
+  return (
+    <div className={`border rounded-xl p-4 bg-white ${alert ? "border-red-300" : "border-neutral-200"}`}>
+      <div className="text-xs font-bold uppercase tracking-widest text-neutral-500">{label}</div>
+      <div className={`text-2xl font-black mt-1 ${alert ? "text-red-600" : ""}`}>{value}</div>
+    </div>
+  );
+}
+
+const TABS = [
+  { key: "bon", label: "Approval Bon" },
+  { key: "items", label: "Barang Gudang" },
+  { key: "medicines", label: "Obat Klinik" },
+  { key: "history", label: "Riwayat Obat" },
+];
+
+function AdminDashboard({ token, onLogout }) {
+  const authHeaders = { Authorization: `Bearer ${token}` };
+  const [tab, setTab] = useState("bon");
+  const [stats, setStats] = useState(null);
+  const [bonList, setBonList] = useState([]);
+  const [bonFilter, setBonFilter] = useState("pending");
+  const [items, setItems] = useState([]);
+  const [medicines, setMedicines] = useState([]);
+  const [history, setHistory] = useState([]);
+  const [editingItem, setEditingItem] = useState(null);
+  const [editingMedicine, setEditingMedicine] = useState(null);
+  const [loading, setLoading] = useState(true);
+
+  const loadAll = useCallback(async () => {
+    setLoading(true);
+    const [sRes, bRes, iRes, mRes, hRes] = await Promise.all([
+      fetch(`${API_BASE}/admin/stats`, { headers: authHeaders }),
+      fetch(`${API_BASE}/admin/bon${bonFilter ? "?status=" + bonFilter : ""}`, { headers: authHeaders }),
+      fetch(`${API_BASE}/admin/items`, { headers: authHeaders }),
+      fetch(`${API_BASE}/admin/medicines`, { headers: authHeaders }),
+      fetch(`${API_BASE}/admin/medicine-transactions`, { headers: authHeaders }),
+    ]);
+    if ([sRes, bRes, iRes, mRes, hRes].some((r) => r.status === 401)) {
+      onLogout();
+      return;
+    }
+    setStats(await sRes.json());
+    setBonList(await bRes.json());
+    setItems(await iRes.json());
+    setMedicines(await mRes.json());
+    setHistory(await hRes.json());
+    setLoading(false);
+  }, [token, bonFilter]);
+
+  useEffect(() => { loadAll(); }, [loadAll]);
+
+  const decideBon = async (id, action) => {
+    await fetch(`${API_BASE}/admin/bon/${id}/${action}`, {
+      method: "POST",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify({}),
+    });
+    loadAll();
+  };
+
+  const saveItem = async (item) => {
+    const method = item.id ? "PUT" : "POST";
+    const url = item.id ? `${API_BASE}/admin/items/${item.id}` : `${API_BASE}/admin/items`;
+    const r = await fetch(url, {
+      method,
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify(item),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      alert(err.detail || "Gagal menyimpan barang");
+      return;
+    }
+    setEditingItem(null);
+    loadAll();
+  };
+
+  const deleteItem = async (id) => {
+    if (!window.confirm("Hapus barang ini?")) return;
+    await fetch(`${API_BASE}/admin/items/${id}`, { method: "DELETE", headers: authHeaders });
+    loadAll();
+  };
+
+  const saveMedicine = async (med) => {
+    const method = med.id ? "PUT" : "POST";
+    const url = med.id ? `${API_BASE}/admin/medicines/${med.id}` : `${API_BASE}/admin/medicines`;
+    await fetch(url, {
+      method,
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify(med),
+    });
+    setEditingMedicine(null);
+    loadAll();
+  };
+
+  const deleteMedicine = async (id) => {
+    if (!window.confirm("Hapus obat ini?")) return;
+    await fetch(`${API_BASE}/admin/medicines/${id}`, { method: "DELETE", headers: authHeaders });
+    loadAll();
+  };
+
+  if (loading) return <div className="max-w-5xl mx-auto px-4 py-16 text-neutral-500">Memuat...</div>;
+
+  return (
+    <div className="max-w-5xl mx-auto px-4 py-10">
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <h1 className="text-2xl font-black">Dashboard Admin</h1>
+        <button onClick={onLogout} className="border border-neutral-300 text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg">Keluar</button>
+      </div>
+
+      {stats && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
+          <StatCard label="Bon Pending" value={stats.pending_bon} alert={stats.pending_bon > 0} />
+          <StatCard label="Barang Stok Rendah" value={stats.low_stock_items} alert={stats.low_stock_items > 0} />
+          <StatCard label="Obat Stok Rendah" value={stats.low_stock_medicines} alert={stats.low_stock_medicines > 0} />
+          <StatCard label="Total Barang" value={stats.total_items} />
+        </div>
+      )}
+
+      <div className="flex gap-1 flex-wrap mt-8 border-b border-neutral-200">
+        {TABS.map((t) => (
+          <button key={t.key} onClick={() => setTab(t.key)}
+            className={`px-4 py-2 text-sm font-bold uppercase tracking-wide border-b-2 -mb-px ${tab === t.key ? "border-neutral-900 text-neutral-900" : "border-transparent text-neutral-400"}`}>
+            {t.label}
+          </button>
+        ))}
+      </div>
+
+      {tab === "bon" && (
+        <div className="mt-6">
+          <div className="flex gap-2 mb-4">
+            {["pending", "approved", "rejected", ""].map((s) => (
+              <button key={s || "all"} onClick={() => setBonFilter(s)}
+                className={`text-xs font-bold uppercase px-3 py-1.5 rounded-lg border ${bonFilter === s ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300"}`}>
+                {s || "Semua"}
+              </button>
+            ))}
+          </div>
+          <div className="space-y-3">
+            {bonList.map((b) => (
+              <Card key={b.id}>
+                <div className="flex justify-between items-start flex-wrap gap-2">
+                  <div>
+                    <div className="font-bold">{b.requester_name} — {b.room}</div>
+                    <div className="text-xs text-neutral-400">{fmtDate(b.requested_at)}</div>
+                  </div>
+                  <span className={`text-xs font-bold uppercase px-2 py-1 rounded ${b.status === "pending" ? "bg-yellow-100 text-yellow-800" : b.status === "approved" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
+                    {b.status}
+                  </span>
+                </div>
+                <ul className="mt-3 text-sm space-y-1">
+                  {b.items.map((line, i) => (
+                    <li key={i} className="flex justify-between border-b border-neutral-100 pb-1">
+                      <span>{line.item_name}</span>
+                      <span className="font-semibold">{fmtNum(line.qty)} {line.unit}</span>
+                    </li>
+                  ))}
+                </ul>
+                {b.status === "pending" && (
+                  <div className="flex gap-2 mt-4">
+                    <button onClick={() => decideBon(b.id, "approve")} className="flex-1 bg-neutral-900 text-white text-xs font-bold uppercase py-2 rounded-lg">Setujui</button>
+                    <button onClick={() => decideBon(b.id, "reject")} className="flex-1 border border-red-300 text-red-600 text-xs font-bold uppercase py-2 rounded-lg">Tolak</button>
+                  </div>
+                )}
+              </Card>
+            ))}
+            {bonList.length === 0 && <div className="text-sm text-neutral-400">Tidak ada bon.</div>}
+          </div>
+        </div>
+      )}
+
+      {tab === "items" && (
+        <div className="mt-6">
+          <button onClick={() => setEditingItem({ name: "", barcode: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
+            className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg mb-4">
+            + Barang Baru
+          </button>
+          <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto">
+            <table className="w-full text-sm min-w-[600px]">
+              <thead>
+                <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                  <th className="p-3">Nama</th>
+                  <th className="p-3">Barcode</th>
+                  <th className="p-3">Stok</th>
+                  <th className="p-3"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {items.map((it) => (
+                  <tr key={it.id} className="border-b border-neutral-100 last:border-0">
+                    <td className="p-3">
+                      <div className="font-semibold">{it.name}</div>
+                      <div className="text-xs text-neutral-400">{it.category}</div>
+                    </td>
+                    <td className="p-3 text-xs text-neutral-500">{it.barcode}</td>
+                    <td className={`p-3 font-bold ${it.current_stock <= it.min_stock ? "text-red-600" : ""}`}>{fmtNum(it.current_stock)} {it.unit}</td>
+                    <td className="p-3 text-right whitespace-nowrap">
+                      <button onClick={() => setEditingItem(it)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
+                      <button onClick={() => deleteItem(it.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "medicines" && (
+        <div className="mt-6">
+          <button onClick={() => setEditingMedicine({ name: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
+            className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg mb-4">
+            + Obat Baru
+          </button>
+          <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto">
+            <table className="w-full text-sm min-w-[500px]">
+              <thead>
+                <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                  <th className="p-3">Nama</th>
+                  <th className="p-3">Stok</th>
+                  <th className="p-3"></th>
+                </tr>
+              </thead>
+              <tbody>
+                {medicines.map((m) => (
+                  <tr key={m.id} className="border-b border-neutral-100 last:border-0">
+                    <td className="p-3">
+                      <div className="font-semibold">{m.name}</div>
+                      <div className="text-xs text-neutral-400">{m.category}</div>
+                    </td>
+                    <td className={`p-3 font-bold ${m.current_stock <= m.min_stock ? "text-red-600" : ""}`}>{fmtNum(m.current_stock)} {m.unit}</td>
+                    <td className="p-3 text-right whitespace-nowrap">
+                      <button onClick={() => setEditingMedicine(m)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
+                      <button onClick={() => deleteMedicine(m.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        </div>
+      )}
+
+      {tab === "history" && (
+        <div className="mt-6 bg-white border border-neutral-200 rounded-2xl overflow-x-auto">
+          <table className="w-full text-sm min-w-[600px]">
+            <thead>
+              <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                <th className="p-3">Waktu</th>
+                <th className="p-3">Obat</th>
+                <th className="p-3">Tipe</th>
+                <th className="p-3">Jumlah</th>
+                <th className="p-3">Oleh</th>
+              </tr>
+            </thead>
+            <tbody>
+              {history.map((h) => (
+                <tr key={h.id} className="border-b border-neutral-100 last:border-0">
+                  <td className="p-3 text-xs text-neutral-500">{fmtDate(h.created_at)}</td>
+                  <td className="p-3 font-semibold">{h.medicine_name}</td>
+                  <td className="p-3">
+                    <span className={`text-xs font-bold uppercase px-2 py-1 rounded ${h.type === "masuk" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>{h.type}</span>
+                  </td>
+                  <td className="p-3">{fmtNum(h.qty)}</td>
+                  <td className="p-3 text-xs text-neutral-500">{h.nurse_name}</td>
+                </tr>
+              ))}
+              {history.length === 0 && (
+                <tr><td colSpan="5" className="p-3 text-sm text-neutral-400">Belum ada riwayat.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      )}
+
+      {editingItem && (
+        <ItemEditModal item={editingItem} onClose={() => setEditingItem(null)} onSave={saveItem} />
+      )}
+      {editingMedicine && (
+        <MedicineEditModal medicine={editingMedicine} onClose={() => setEditingMedicine(null)} onSave={saveMedicine} />
+      )}
+    </div>
+  );
+}
+
+function ItemEditModal({ item, onClose, onSave }) {
+  const [form, setForm] = useState({ ...item });
+  const submit = (e) => {
+    e.preventDefault();
+    onSave({ ...form, current_stock: Number(form.current_stock), min_stock: Number(form.min_stock) });
+  };
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-6 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-black mb-4">{item.id ? "Edit Barang" : "Barang Baru"}</h2>
+        <form onSubmit={submit} className="space-y-3">
+          <Field label="Nama Barang">
+            <input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+          </Field>
+          <Field label="Barcode">
+            <input className={inputCls} value={form.barcode} onChange={(e) => setForm({ ...form, barcode: e.target.value })} required />
+          </Field>
+          <Field label="Kategori">
+            <input className={inputCls} value={form.category || ""} onChange={(e) => setForm({ ...form, category: e.target.value })} />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Satuan">
+              <input className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
+            </Field>
+            <Field label="Stok Saat Ini">
+              <input type="number" className={inputCls} value={form.current_stock} onChange={(e) => setForm({ ...form, current_stock: e.target.value })} />
+            </Field>
+          </div>
+          <Field label="Stok Minimum (alert)">
+            <input type="number" className={inputCls} value={form.min_stock} onChange={(e) => setForm({ ...form, min_stock: e.target.value })} />
+          </Field>
+          <div className="flex gap-2 pt-2">
+            <button type="button" onClick={onClose} className="flex-1 border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase">Batal</button>
+            <button type="submit" className="flex-1 bg-neutral-900 text-white rounded-lg py-2 text-sm font-bold uppercase">Simpan</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function MedicineEditModal({ medicine, onClose, onSave }) {
+  const [form, setForm] = useState({ ...medicine });
+  const submit = (e) => {
+    e.preventDefault();
+    onSave({ ...form, current_stock: Number(form.current_stock), min_stock: Number(form.min_stock) });
+  };
+  return (
+    <div className="fixed inset-0 bg-black/50 flex items-center justify-center p-4 z-30" onClick={onClose}>
+      <div className="bg-white rounded-2xl p-6 max-w-md w-full" onClick={(e) => e.stopPropagation()}>
+        <h2 className="text-lg font-black mb-4">{medicine.id ? "Edit Obat" : "Obat Baru"}</h2>
+        <form onSubmit={submit} className="space-y-3">
+          <Field label="Nama Obat">
+            <input className={inputCls} value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })} required />
+          </Field>
+          <Field label="Kategori">
+            <input className={inputCls} value={form.category || ""} onChange={(e) => setForm({ ...form, category: e.target.value })} />
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Satuan">
+              <input className={inputCls} value={form.unit} onChange={(e) => setForm({ ...form, unit: e.target.value })} />
+            </Field>
+            <Field label="Stok Saat Ini">
+              <input type="number" className={inputCls} value={form.current_stock} onChange={(e) => setForm({ ...form, current_stock: e.target.value })} />
+            </Field>
+          </div>
+          <Field label="Stok Minimum (alert)">
+            <input type="number" className={inputCls} value={form.min_stock} onChange={(e) => setForm({ ...form, min_stock: e.target.value })} />
+          </Field>
+          <div className="flex gap-2 pt-2">
+            <button type="button" onClick={onClose} className="flex-1 border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase">Batal</button>
+            <button type="submit" className="flex-1 bg-neutral-900 text-white rounded-lg py-2 text-sm font-bold uppercase">Simpan</button>
+          </div>
+        </form>
+      </div>
+    </div>
+  );
+}
+
+function AdminPage() {
+  const [token, saveToken, clearToken] = useAdminToken();
+  if (!token) return <AdminLogin onLogin={saveToken} />;
+  return <AdminDashboard token={token} onLogout={clearToken} />;
+}
+
+// ---------------- Root ----------------
+
+function App() {
+  const hash = useHashRoute();
+  const path = hash.replace(/^#\/?/, "");
+
+  let content;
+  if (path === "") content = <Home />;
+  else if (path === "gudang") content = <GudangPage />;
+  else if (path === "klinik") content = <KlinikPage />;
+  else if (path === "admin") content = <AdminPage />;
+  else content = <Home />;
+
+  return (
+    <div className="min-h-screen flex flex-col">
+      <Header />
+      <main className="flex-1">{content}</main>
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(<App />);
