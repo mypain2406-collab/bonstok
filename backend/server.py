@@ -46,6 +46,29 @@ def now_iso():
     return datetime.now(timezone.utc).isoformat()
 
 
+def fmt_num(n):
+    try:
+        return f"{float(n):,.0f}".replace(",", ".")
+    except Exception:
+        return str(n)
+
+
+def parse_date_range(start: Optional[str], end: Optional[str]):
+    start_dt = None
+    end_dt = None
+    if start:
+        try:
+            start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+        except Exception:
+            start_dt = None
+    if end:
+        try:
+            end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc) + timedelta(days=1)
+        except Exception:
+            end_dt = None
+    return start_dt, end_dt
+
+
 # ---------------- Admin token (HMAC, no external deps) ----------------
 
 def make_token() -> str:
@@ -92,16 +115,6 @@ class ItemPayload(BaseModel):
     photo: Optional[str] = None
 
 
-class StockInPayload(BaseModel):
-    item_id: Optional[str] = None
-    name: Optional[str] = None
-    barcode: Optional[str] = None
-    unit: str = "pcs"
-    qty: float
-    photo: Optional[str] = None
-    note: Optional[str] = None
-
-
 class BonItemLine(BaseModel):
     item_id: str
     qty: float
@@ -109,6 +122,7 @@ class BonItemLine(BaseModel):
 
 class BonRequestPayload(BaseModel):
     requester_name: str
+    room_id: Optional[str] = None
     room: str
     items: List[BonItemLine]
     note: Optional[str] = None
@@ -127,6 +141,19 @@ class MedicineTransactionPayload(BaseModel):
     type: str  # "masuk" | "keluar"
     qty: float
     nurse_name: str
+    note: Optional[str] = None
+
+
+class RoomPayload(BaseModel):
+    name: str
+
+
+class StockInPayload(BaseModel):
+    item_id: Optional[str] = None
+    name: Optional[str] = None
+    unit: str = "pcs"
+    qty: float
+    photo: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -157,12 +184,42 @@ async def get_item_by_barcode(barcode: str):
     return item
 
 
+# ---------------- Public: rooms ----------------
+
+@api_router.get("/rooms")
+async def list_rooms(search: Optional[str] = None):
+    q = {}
+    if search:
+        q = {"name": {"$regex": search, "$options": "i"}}
+    rooms = await db.rooms.find(q, {"_id": 0}).sort("name", 1).to_list(500)
+    return rooms
+
+
+@api_router.get("/rooms/by-barcode/{barcode}")
+async def get_room_by_barcode(barcode: str):
+    room = await db.rooms.find_one({"barcode": barcode}, {"_id": 0})
+    if not room:
+        raise HTTPException(status_code=404, detail="Ruangan dengan barcode ini tidak ditemukan")
+    return room
+
+
 # ---------------- Public: bon request ----------------
 
 @api_router.post("/bon")
 async def submit_bon(payload: BonRequestPayload):
     if not payload.items:
         raise HTTPException(status_code=400, detail="Keranjang bon kosong")
+
+    room_name = payload.room
+    room_id = payload.room_id
+    if payload.room_id:
+        room = await db.rooms.find_one({"id": payload.room_id})
+        if not room:
+            raise HTTPException(status_code=404, detail="Ruangan tidak ditemukan")
+        room_name = room["name"]
+
+    if not room_name or not room_name.strip():
+        raise HTTPException(status_code=400, detail="Ruangan wajib diisi")
 
     lines = []
     for line in payload.items:
@@ -182,7 +239,8 @@ async def submit_bon(payload: BonRequestPayload):
     doc = {
         "id": new_id(),
         "requester_name": payload.requester_name,
-        "room": payload.room,
+        "room_id": room_id,
+        "room": room_name,
         "items": lines,
         "note": payload.note,
         "status": "pending",
@@ -290,7 +348,7 @@ async def admin_delete_item(item_id: str, _: bool = Depends(require_admin)):
     return {"ok": True}
 
 
-# ---------------- Admin: persediaan (barang masuk & riwayat) ----------------
+# ---------------- Admin: stock in & item transactions (persediaan) ----------------
 
 @api_router.post("/admin/items/stock-in")
 async def admin_stock_in(payload: StockInPayload, _: bool = Depends(require_admin)):
@@ -302,13 +360,13 @@ async def admin_stock_in(payload: StockInPayload, _: bool = Depends(require_admi
         item = await db.items.find_one({"id": payload.item_id})
         if not item:
             raise HTTPException(status_code=404, detail="Barang tidak ditemukan")
-    elif payload.name:
+    elif payload.name and payload.name.strip():
         item = await db.items.find_one({"name": {"$regex": f"^{re.escape(payload.name.strip())}$", "$options": "i"}})
         if not item:
-            barcode = (payload.barcode or "").strip() or f"AUTO-{new_id()[:8].upper()}"
-            if await db.items.find_one({"barcode": barcode}):
+            barcode = f"AUTO-{new_id()[:8].upper()}"
+            while await db.items.find_one({"barcode": barcode}):
                 barcode = f"AUTO-{new_id()[:8].upper()}"
-            item = {
+            doc = {
                 "id": new_id(),
                 "name": payload.name.strip(),
                 "barcode": barcode,
@@ -319,7 +377,8 @@ async def admin_stock_in(payload: StockInPayload, _: bool = Depends(require_admi
                 "photo": payload.photo,
                 "created_at": now_iso(),
             }
-            await db.items.insert_one(dict(item))
+            await db.items.insert_one(doc)
+            item = doc
     else:
         raise HTTPException(status_code=400, detail="Pilih barang yang sudah ada atau isi nama barang baru")
 
@@ -346,8 +405,48 @@ async def admin_list_item_transactions(item_id: Optional[str] = None, _: bool = 
     q = {}
     if item_id:
         q["item_id"] = item_id
-    txs = await db.item_transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
-    return txs
+    items = await db.item_transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
+    return items
+
+
+# ---------------- Admin: rooms ----------------
+
+@api_router.get("/admin/rooms")
+async def admin_list_rooms(_: bool = Depends(require_admin)):
+    rooms = await db.rooms.find({}, {"_id": 0}).sort("name", 1).to_list(1000)
+    return rooms
+
+
+@api_router.post("/admin/rooms")
+async def admin_create_room(payload: RoomPayload, _: bool = Depends(require_admin)):
+    barcode = f"ROOM-{new_id()[:8].upper()}"
+    while await db.rooms.find_one({"barcode": barcode}):
+        barcode = f"ROOM-{new_id()[:8].upper()}"
+    doc = {
+        "id": new_id(),
+        "name": payload.name,
+        "barcode": barcode,
+        "created_at": now_iso(),
+    }
+    await db.rooms.insert_one(doc)
+    doc.pop("_id", None)
+    return doc
+
+
+@api_router.put("/admin/rooms/{room_id}")
+async def admin_update_room(room_id: str, payload: RoomPayload, _: bool = Depends(require_admin)):
+    existing = await db.rooms.find_one({"id": room_id})
+    if not existing:
+        raise HTTPException(status_code=404, detail="Ruangan tidak ditemukan")
+    await db.rooms.update_one({"id": room_id}, {"$set": {"name": payload.name, "updated_at": now_iso()}})
+    updated = await db.rooms.find_one({"id": room_id}, {"_id": 0})
+    return updated
+
+
+@api_router.delete("/admin/rooms/{room_id}")
+async def admin_delete_room(room_id: str, _: bool = Depends(require_admin)):
+    await db.rooms.delete_one({"id": room_id})
+    return {"ok": True}
 
 
 # ---------------- Admin: bon requests ----------------
@@ -389,7 +488,7 @@ async def admin_approve_bon(bon_id: str, _: bool = Depends(require_admin)):
             "qty": line["qty"],
             "unit": line.get("unit", "pcs"),
             "photo": None,
-            "note": f"Bon: {bon['requester_name']} - {bon['room']}",
+            "note": f"Bon: {bon['requester_name']} - {bon.get('room', '')}",
             "created_at": now_iso(),
         })
 
@@ -466,24 +565,32 @@ async def admin_list_medicine_transactions(medicine_id: Optional[str] = None, _:
     return items
 
 
-# ---------------- Admin: laporan persediaan (export) ----------------
+# ---------------- Admin: stats ----------------
 
-def fmt_num(n):
-    try:
-        return f"{float(n):,.0f}".replace(",", ".")
-    except Exception:
-        return str(n)
+@api_router.get("/admin/stats")
+async def admin_stats(_: bool = Depends(require_admin)):
+    total_items = await db.items.count_documents({})
+    low_stock_items = await db.items.count_documents({"$expr": {"$lte": ["$current_stock", "$min_stock"]}})
+    total_medicines = await db.medicines.count_documents({})
+    low_stock_medicines = await db.medicines.count_documents({"$expr": {"$lte": ["$current_stock", "$min_stock"]}})
+    pending_bon = await db.bon_requests.count_documents({"status": "pending"})
+    approved_bon = await db.bon_requests.count_documents({"status": "approved"})
+    rejected_bon = await db.bon_requests.count_documents({"status": "rejected"})
+    total_rooms = await db.rooms.count_documents({})
+
+    return {
+        "total_items": total_items,
+        "low_stock_items": low_stock_items,
+        "total_medicines": total_medicines,
+        "low_stock_medicines": low_stock_medicines,
+        "pending_bon": pending_bon,
+        "approved_bon": approved_bon,
+        "rejected_bon": rejected_bon,
+        "total_rooms": total_rooms,
+    }
 
 
-def parse_date_range(start: Optional[str], end: Optional[str]):
-    start_dt = None
-    end_dt = None
-    if start:
-        start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
-    if end:
-        end_dt = datetime.fromisoformat(end).replace(tzinfo=timezone.utc) + timedelta(days=1)
-    return start_dt, end_dt
-
+# ---------------- Admin: laporan persediaan (export PDF / Excel) ----------------
 
 def build_pdf_report(rows, title_label, period_label):
     from reportlab.lib.pagesizes import A4
@@ -497,20 +604,17 @@ def build_pdf_report(rows, title_label, period_label):
                              leftMargin=1.5 * cm, rightMargin=1.5 * cm)
     styles = getSampleStyleSheet()
     elements = [
-        Paragraph("<b>Laporan Persediaan</b>", styles["Title"]),
-        Paragraph(f"Modul: {title_label}", styles["Normal"]),
+        Paragraph(f"<b>Laporan Persediaan — {title_label}</b>", styles["Title"]),
         Paragraph(f"Periode: {period_label}", styles["Normal"]),
         Paragraph(f"Dicetak: {now_iso()[:19].replace('T', ' ')} UTC", styles["Normal"]),
-        Spacer(1, 14),
+        Spacer(1, 12),
     ]
 
     data = [["No", "Nama Barang", "Satuan", "Total Masuk", "Total Keluar", "Saldo Akhir"]]
     for i, r in enumerate(rows, 1):
         data.append([str(i), r["name"], r["unit"], fmt_num(r["masuk"]), fmt_num(r["keluar"]), fmt_num(r["saldo"])])
-    if len(data) == 1:
-        data.append(["-", "Tidak ada data", "-", "-", "-", "-"])
 
-    table = Table(data, repeatRows=1, colWidths=[1.3 * cm, 6.5 * cm, 2 * cm, 3 * cm, 3 * cm, 3 * cm])
+    table = Table(data, repeatRows=1, colWidths=[1.2 * cm, 6.5 * cm, 2 * cm, 3 * cm, 3 * cm, 3 * cm])
     table.setStyle(TableStyle([
         ("BACKGROUND", (0, 0), (-1, 0), colors.HexColor("#171717")),
         ("TEXTCOLOR", (0, 0), (-1, 0), colors.white),
@@ -591,12 +695,10 @@ async def admin_report(
         master = await db.items.find({}, {"_id": 0}).sort("name", 1).to_list(2000)
         txs = await db.item_transactions.find({}, {"_id": 0}).to_list(20000)
         title_label = "Barang Gudang"
-        key_field = "item_id"
     else:
         master = await db.medicines.find({}, {"_id": 0}).sort("name", 1).to_list(2000)
         txs = await db.medicine_transactions.find({}, {"_id": 0}).to_list(20000)
         title_label = "Obat Klinik"
-        key_field = "medicine_id"
 
     totals = {}
     for tx in txs:
@@ -608,13 +710,12 @@ async def admin_report(
             continue
         if end_dt and ts >= end_dt:
             continue
-        key = tx.get(key_field)
-        if key not in totals:
-            totals[key] = {"masuk": 0.0, "keluar": 0.0}
+        key = tx.get("item_id") or tx.get("medicine_id")
+        bucket = totals.setdefault(key, {"masuk": 0.0, "keluar": 0.0})
         if tx.get("type") == "masuk":
-            totals[key]["masuk"] += tx.get("qty", 0)
+            bucket["masuk"] += tx.get("qty", 0)
         elif tx.get("type") == "keluar":
-            totals[key]["keluar"] += tx.get("qty", 0)
+            bucket["keluar"] += tx.get("qty", 0)
 
     rows = []
     for m in master:
@@ -634,29 +735,6 @@ async def admin_report(
     return build_pdf_report(rows, title_label, period_label)
 
 
-# ---------------- Admin: stats ----------------
-
-@api_router.get("/admin/stats")
-async def admin_stats(_: bool = Depends(require_admin)):
-    total_items = await db.items.count_documents({})
-    low_stock_items = await db.items.count_documents({"$expr": {"$lte": ["$current_stock", "$min_stock"]}})
-    total_medicines = await db.medicines.count_documents({})
-    low_stock_medicines = await db.medicines.count_documents({"$expr": {"$lte": ["$current_stock", "$min_stock"]}})
-    pending_bon = await db.bon_requests.count_documents({"status": "pending"})
-    approved_bon = await db.bon_requests.count_documents({"status": "approved"})
-    rejected_bon = await db.bon_requests.count_documents({"status": "rejected"})
-
-    return {
-        "total_items": total_items,
-        "low_stock_items": low_stock_items,
-        "total_medicines": total_medicines,
-        "low_stock_medicines": low_stock_medicines,
-        "pending_bon": pending_bon,
-        "approved_bon": approved_bon,
-        "rejected_bon": rejected_bon,
-    }
-
-
 # ---------------- Startup ----------------
 
 @app.on_event("startup")
@@ -668,6 +746,8 @@ async def startup():
     await db.bon_requests.create_index("status")
     await db.medicine_transactions.create_index("id", unique=True)
     await db.medicine_transactions.create_index("medicine_id")
+    await db.rooms.create_index("id", unique=True)
+    await db.rooms.create_index("barcode", unique=True)
     await db.item_transactions.create_index("id", unique=True)
     await db.item_transactions.create_index("item_id")
 
