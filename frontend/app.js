@@ -26,6 +26,15 @@ function useHashRoute() {
   return hash;
 }
 
+function useClock() {
+  const [now, setNow] = useState(new Date());
+  useEffect(() => {
+    const id = setInterval(() => setNow(new Date()), 1000);
+    return () => clearInterval(id);
+  }, []);
+  return now;
+}
+
 function Header() {
   return (
     <header className="border-b border-neutral-200 bg-white sticky top-0 z-20">
@@ -33,11 +42,6 @@ function Header() {
         <a href="#/" className="flex items-center gap-2">
           <span className="text-2xl font-black tracking-tight">BonStok</span>
         </a>
-        <nav className="flex gap-1 flex-wrap text-sm font-medium">
-          <a href="#/gudang" className="px-3 py-1.5 rounded-lg hover:bg-neutral-100">Gudang</a>
-          <a href="#/klinik" className="px-3 py-1.5 rounded-lg hover:bg-neutral-100">Klinik</a>
-          <a href="#/admin" className="px-3 py-1.5 rounded-lg hover:bg-neutral-100">Admin</a>
-        </nav>
       </div>
     </header>
   );
@@ -106,39 +110,6 @@ function printRoomBarcodes(rooms) {
   setTimeout(() => { try { win.print(); } catch (e) {} }, 350);
 }
 
-// ---------------- Home ----------------
-
-function Home() {
-  return (
-    <div className="max-w-4xl mx-auto px-4 py-16">
-      <div className="text-center max-w-xl mx-auto">
-        <div className="text-xs font-bold uppercase tracking-[0.3em] text-neutral-500">Bon &amp; Stok</div>
-        <h1 className="text-4xl font-black tracking-tight mt-3">Ambil barang, catat stok, tanpa repot.</h1>
-        <p className="text-neutral-600 mt-4">
-          Scan barcode ruangan untuk bon barang gudang, catat keluar-masuk obat klinik, dan pantau semuanya dari satu dashboard admin.
-        </p>
-      </div>
-      <div className="grid sm:grid-cols-3 gap-4 mt-12">
-        <a href="#/gudang" className="border border-neutral-200 rounded-2xl p-6 bg-white hover:border-neutral-900 hover:shadow-md transition-all">
-          <div className="text-3xl">📦</div>
-          <div className="font-bold text-lg mt-3">Ambil Barang Gudang</div>
-          <div className="text-sm text-neutral-500 mt-1">Scan barcode ruangan, ajukan bon.</div>
-        </a>
-        <a href="#/klinik" className="border border-neutral-200 rounded-2xl p-6 bg-white hover:border-neutral-900 hover:shadow-md transition-all">
-          <div className="text-3xl">💊</div>
-          <div className="font-bold text-lg mt-3">Stok Obat Klinik</div>
-          <div className="text-sm text-neutral-500 mt-1">Catat obat masuk / keluar.</div>
-        </a>
-        <a href="#/admin" className="border border-neutral-200 rounded-2xl p-6 bg-white hover:border-neutral-900 hover:shadow-md transition-all">
-          <div className="text-3xl">🔐</div>
-          <div className="font-bold text-lg mt-3">Admin</div>
-          <div className="text-sm text-neutral-500 mt-1">Kelola barang, ruangan, persediaan, approval bon.</div>
-        </a>
-      </div>
-    </div>
-  );
-}
-
 // ---------------- Barcode scanner modal (camera) ----------------
 
 function ScannerModal({ onDetected, onClose, title, hint }) {
@@ -186,10 +157,11 @@ function ScannerModal({ onDetected, onClose, title, hint }) {
   );
 }
 
-// ---------------- Gudang (warehouse bon) ----------------
+// ---------------- Gudang (warehouse bon) — kiosk-style user flow ----------------
 
 function GudangPage() {
   const [toast, showToast] = useToast();
+  const now = useClock();
   const [requesterName, setRequesterName] = useState("");
   const [room, setRoom] = useState(null); // { id, name, barcode }
   const [showRoomScanner, setShowRoomScanner] = useState(false);
@@ -200,6 +172,7 @@ function GudangPage() {
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [submitting, setSubmitting] = useState(false);
+  const [submittedBon, setSubmittedBon] = useState(null);
 
   const lookupRoomBarcode = async (code) => {
     if (!code) return;
@@ -298,7 +271,8 @@ function GudangPage() {
         const err = await r.json().catch(() => ({}));
         throw new Error(err.detail || "Gagal mengajukan bon");
       }
-      showToast("Bon berhasil diajukan, menunggu persetujuan admin.");
+      const bon = await r.json();
+      setSubmittedBon(bon);
       setCart([]);
     } catch (err) {
       showToast(err.message, "error");
@@ -307,11 +281,56 @@ function GudangPage() {
     }
   };
 
+  const startOver = () => {
+    setSubmittedBon(null);
+    setRequesterName("");
+    setRoom(null);
+    setCart([]);
+    setSearchResults([]);
+  };
+
+  const tanggalStr = now.toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
+  const jamStr = now.toLocaleTimeString("id-ID", { hour: "2-digit", minute: "2-digit" });
+
+  if (submittedBon) {
+    return (
+      <div className="max-w-2xl mx-auto px-4 py-16">
+        <Card>
+          <div className="text-center">
+            <div className="text-4xl">✅</div>
+            <h1 className="text-2xl font-black mt-3">Bon Berhasil Diajukan</h1>
+            <p className="text-neutral-600 mt-2">Menunggu persetujuan admin. Bon ini dicatat atas nama <b>{submittedBon.requester_name}</b> dari <b>{submittedBon.room}</b>.</p>
+          </div>
+          <ul className="mt-6 text-sm space-y-1 border-t border-neutral-100 pt-4">
+            {submittedBon.items.map((line, i) => (
+              <li key={i} className="flex justify-between border-b border-neutral-100 pb-1">
+                <span>{line.item_name}</span>
+                <span className="font-semibold">{fmtNum(line.qty)} {line.unit}</span>
+              </li>
+            ))}
+          </ul>
+          <div className="flex flex-col gap-2 mt-6">
+            <a
+              href={`${API_BASE}/bon/${submittedBon.id}/nota-dinas`}
+              className="text-center bg-neutral-900 text-white font-bold text-sm uppercase tracking-widest py-2.5 rounded-lg hover:bg-neutral-700"
+            >
+              📄 Unduh Nota Dinas (Word)
+            </a>
+            <button onClick={startOver} className="border border-neutral-300 rounded-lg py-2.5 text-sm font-bold uppercase tracking-wider hover:bg-neutral-50">
+              Ajukan Bon Baru
+            </button>
+          </div>
+        </Card>
+      </div>
+    );
+  }
+
   return (
     <div className="max-w-4xl mx-auto px-4 py-10">
       <div className="text-xs font-bold uppercase tracking-[0.3em] text-neutral-500">📦 Gudang</div>
       <h1 className="text-3xl font-black tracking-tight mt-2">Ajukan Bon Barang</h1>
       <p className="text-neutral-600 mt-2">Scan barcode ruangan untuk identitas peminta, pilih barang lewat pencarian nama, lalu ajukan bon untuk disetujui admin.</p>
+      <p className="text-sm text-neutral-500 mt-2">{tanggalStr} — {jamStr}</p>
 
       <div className="grid lg:grid-cols-2 gap-6 mt-8">
         <div className="space-y-4">
@@ -338,6 +357,7 @@ function GudangPage() {
                         value={roomBarcodeInput}
                         onChange={(e) => setRoomBarcodeInput(e.target.value)}
                         placeholder="Scan pakai alat, atau ketik kode ruangan lalu Enter"
+                        autoFocus
                       />
                       <button type="submit" className="bg-neutral-900 text-white text-xs font-bold uppercase px-4 rounded-lg whitespace-nowrap">Cari</button>
                     </form>
@@ -374,30 +394,33 @@ function GudangPage() {
             </div>
           </Card>
 
-          <Card>
-            <Field label="Cari nama barang">
-              <input
-                className={inputCls}
-                placeholder="Ketik nama barang..."
-                onChange={(e) => doSearch(e.target.value)}
-              />
-            </Field>
-            {searching && <div className="text-xs text-neutral-400 mt-2">Mencari...</div>}
-            {searchResults.length > 0 && (
-              <div className="mt-2 border border-neutral-200 rounded-lg divide-y divide-neutral-100 max-h-64 overflow-y-auto">
-                {searchResults.map((it) => (
-                  <button
-                    key={it.id}
-                    onClick={() => { addToCart(it); showToast(`${it.name} ditambahkan`); }}
-                    className="w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 flex justify-between items-center"
-                  >
-                    <span>{it.name}</span>
-                    <span className="text-xs text-neutral-400">Stok {fmtNum(it.current_stock)} {it.unit}</span>
-                  </button>
-                ))}
-              </div>
-            )}
-          </Card>
+          {room && (
+            <Card>
+              <Field label="Cari nama barang persediaan">
+                <input
+                  className={inputCls}
+                  placeholder="Ketik nama barang..."
+                  onChange={(e) => doSearch(e.target.value)}
+                  autoFocus
+                />
+              </Field>
+              {searching && <div className="text-xs text-neutral-400 mt-2">Mencari...</div>}
+              {searchResults.length > 0 && (
+                <div className="mt-2 border border-neutral-200 rounded-lg divide-y divide-neutral-100 max-h-64 overflow-y-auto">
+                  {searchResults.map((it) => (
+                    <button
+                      key={it.id}
+                      onClick={() => { addToCart(it); showToast(`${it.name} ditambahkan`); }}
+                      className="w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 flex justify-between items-center"
+                    >
+                      <span>{it.name}</span>
+                      <span className="text-xs text-neutral-400">Stok tersedia: {fmtNum(it.current_stock)} {it.unit}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
+            </Card>
+          )}
         </div>
 
         <Card>
@@ -444,9 +467,59 @@ function GudangPage() {
   );
 }
 
-// ---------------- Klinik (medicine stock) ----------------
+// ---------------- Klinik (medicine stock) — login perawat ----------------
 
-function KlinikPage() {
+function useNurseToken() {
+  const [token, setToken] = useState(localStorage.getItem("bonstok_nurse_token") || "");
+  const save = (t) => { localStorage.setItem("bonstok_nurse_token", t); setToken(t); };
+  const clear = () => { localStorage.removeItem("bonstok_nurse_token"); setToken(""); };
+  return [token, save, clear];
+}
+
+function NurseLogin({ onLogin }) {
+  const [password, setPassword] = useState("");
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setBusy(true);
+    setError("");
+    try {
+      const r = await fetch(`${API_BASE}/nurse/login`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      if (!r.ok) throw new Error("Password salah");
+      const data = await r.json();
+      onLogin(data.token);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  return (
+    <div className="max-w-sm mx-auto px-4 py-24">
+      <div className="text-xs font-bold uppercase tracking-[0.3em] text-neutral-500">💊 Klinik</div>
+      <h1 className="text-2xl font-black mt-2">Login Perawat</h1>
+      <form onSubmit={submit} className="mt-6 space-y-4">
+        <Field label="Password">
+          <input type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
+        </Field>
+        {error && <div className="text-red-600 text-sm">{error}</div>}
+        <button disabled={busy} className="w-full bg-neutral-900 text-white font-bold text-sm uppercase tracking-widest py-2.5 rounded-lg hover:bg-neutral-700 disabled:opacity-50">
+          {busy ? "Memproses..." : "Masuk"}
+        </button>
+      </form>
+    </div>
+  );
+}
+
+function KlinikPage({ token, onLogout }) {
+  const authHeaders = { Authorization: `Bearer ${token}` };
   const [toast, showToast] = useToast();
   const [medicines, setMedicines] = useState([]);
   const [nurseName, setNurseName] = useState("");
@@ -457,10 +530,14 @@ function KlinikPage() {
   const [submitting, setSubmitting] = useState(false);
 
   const load = useCallback(async () => {
-    const r = await fetch(`${API_BASE}/medicines`);
+    const r = await fetch(`${API_BASE}/medicines`, { headers: authHeaders });
+    if (r.status === 401) {
+      onLogout();
+      return;
+    }
     const data = await r.json();
     setMedicines(data);
-  }, []);
+  }, [token]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -474,9 +551,13 @@ function KlinikPage() {
     try {
       const r = await fetch(`${API_BASE}/medicine-transactions`, {
         method: "POST",
-        headers: { "Content-Type": "application/json" },
+        headers: { ...authHeaders, "Content-Type": "application/json" },
         body: JSON.stringify({ medicine_id: medicineId, type, qty: Number(qty), nurse_name: nurseName, note }),
       });
+      if (r.status === 401) {
+        onLogout();
+        return;
+      }
       if (!r.ok) {
         const err = await r.json().catch(() => ({}));
         throw new Error(err.detail || "Gagal mencatat transaksi");
@@ -494,8 +575,13 @@ function KlinikPage() {
 
   return (
     <div className="max-w-4xl mx-auto px-4 py-10">
-      <div className="text-xs font-bold uppercase tracking-[0.3em] text-neutral-500">💊 Klinik</div>
-      <h1 className="text-3xl font-black tracking-tight mt-2">Stok Obat Klinik</h1>
+      <div className="flex items-center justify-between flex-wrap gap-3">
+        <div>
+          <div className="text-xs font-bold uppercase tracking-[0.3em] text-neutral-500">💊 Klinik</div>
+          <h1 className="text-3xl font-black tracking-tight mt-2">Stok Obat Klinik</h1>
+        </div>
+        <button onClick={onLogout} className="border border-neutral-300 text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg h-fit">Keluar</button>
+      </div>
       <p className="text-neutral-600 mt-2">Catat obat masuk (diterima) atau keluar (dipakai/diberikan) — stok terupdate langsung.</p>
 
       <div className="grid lg:grid-cols-2 gap-6 mt-8">
@@ -557,6 +643,12 @@ function KlinikPage() {
       <Toast message={toast && toast.message} type={toast && toast.type} onClose={() => {}} />
     </div>
   );
+}
+
+function KlinikGate() {
+  const [token, saveToken, clearToken] = useNurseToken();
+  if (!token) return <NurseLogin onLogin={saveToken} />;
+  return <KlinikPage token={token} onLogout={clearToken} />;
 }
 
 // ---------------- Admin ----------------
@@ -834,12 +926,20 @@ function AdminDashboard({ token, onLogout }) {
                     </li>
                   ))}
                 </ul>
-                {b.status === "pending" && (
-                  <div className="flex gap-2 mt-4">
-                    <button onClick={() => decideBon(b.id, "approve")} className="flex-1 bg-neutral-900 text-white text-xs font-bold uppercase py-2 rounded-lg">Setujui</button>
-                    <button onClick={() => decideBon(b.id, "reject")} className="flex-1 border border-red-300 text-red-600 text-xs font-bold uppercase py-2 rounded-lg">Tolak</button>
-                  </div>
-                )}
+                <div className="flex gap-2 mt-4 flex-wrap">
+                  {b.status === "pending" && (
+                    <>
+                      <button onClick={() => decideBon(b.id, "approve")} className="flex-1 bg-neutral-900 text-white text-xs font-bold uppercase py-2 rounded-lg">Setujui</button>
+                      <button onClick={() => decideBon(b.id, "reject")} className="flex-1 border border-red-300 text-red-600 text-xs font-bold uppercase py-2 rounded-lg">Tolak</button>
+                    </>
+                  )}
+                  <a
+                    href={`${API_BASE}/bon/${b.id}/nota-dinas`}
+                    className="flex-1 text-center border border-neutral-300 text-xs font-bold uppercase py-2 rounded-lg hover:bg-neutral-50"
+                  >
+                    📄 Nota Dinas
+                  </a>
+                </div>
               </Card>
             ))}
             {bonList.length === 0 && <div className="text-sm text-neutral-400">Tidak ada bon.</div>}
@@ -1325,11 +1425,9 @@ function App() {
   const path = hash.replace(/^#\/?/, "");
 
   let content;
-  if (path === "") content = <Home />;
-  else if (path === "gudang") content = <GudangPage />;
-  else if (path === "klinik") content = <KlinikPage />;
+  if (path === "klinik") content = <KlinikGate />;
   else if (path === "admin") content = <AdminPage />;
-  else content = <Home />;
+  else content = <GudangPage />;
 
   return (
     <div className="min-h-screen flex flex-col">
