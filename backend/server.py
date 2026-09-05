@@ -21,6 +21,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "bonstok")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "changeme123")
+NURSE_PASSWORD = os.environ.get("NURSE_PASSWORD", "changeme456")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "change-this-secret")
 
 client = AsyncIOMotorClient(MONGO_URL)
@@ -69,34 +70,44 @@ def parse_date_range(start: Optional[str], end: Optional[str]):
     return start_dt, end_dt
 
 
-# ---------------- Admin token (HMAC, no external deps) ----------------
+# ---------------- Auth tokens (HMAC, role-aware, no external deps) ----------------
 
-def make_token() -> str:
+def make_token(role: str) -> str:
     ts = str(int(time.time()))
-    sig = hmac.new(TOKEN_SECRET.encode(), ts.encode(), hashlib.sha256).hexdigest()
-    return f"{ts}.{sig}"
+    sig = hmac.new(TOKEN_SECRET.encode(), f"{role}.{ts}".encode(), hashlib.sha256).hexdigest()
+    return f"{role}.{ts}.{sig}"
 
 
-def verify_token(token: str) -> bool:
+def verify_token(token: str) -> Optional[str]:
+    """Returns the role encoded in the token if valid & not expired, else None."""
     try:
-        ts, sig = token.split(".", 1)
-        expected = hmac.new(TOKEN_SECRET.encode(), ts.encode(), hashlib.sha256).hexdigest()
+        role, ts, sig = token.split(".", 2)
+        expected = hmac.new(TOKEN_SECRET.encode(), f"{role}.{ts}".encode(), hashlib.sha256).hexdigest()
         if not hmac.compare_digest(sig, expected):
-            return False
+            return None
         if time.time() - int(ts) > 7 * 24 * 3600:
-            return False
-        return True
+            return None
+        return role
     except Exception:
-        return False
+        return None
 
 
 async def require_admin(authorization: Optional[str] = Header(None)):
     if not authorization or not authorization.startswith("Bearer "):
         raise HTTPException(status_code=401, detail="Tidak ada token")
-    token = authorization.split(" ", 1)[1]
-    if not verify_token(token):
+    role = verify_token(authorization.split(" ", 1)[1])
+    if role != "admin":
         raise HTTPException(status_code=401, detail="Token tidak valid atau kedaluwarsa")
     return True
+
+
+async def require_nurse(authorization: Optional[str] = Header(None)):
+    if not authorization or not authorization.startswith("Bearer "):
+        raise HTTPException(status_code=401, detail="Tidak ada token")
+    role = verify_token(authorization.split(" ", 1)[1])
+    if role not in ("admin", "nurse"):
+        raise HTTPException(status_code=401, detail="Token tidak valid atau kedaluwarsa")
+    return role
 
 
 # ---------------- Models ----------------
@@ -253,10 +264,180 @@ async def submit_bon(payload: BonRequestPayload):
     return doc
 
 
-# ---------------- Public: medicines (klinik) ----------------
+# ---------------- Nota Dinas (Word export) ----------------
+
+def _remove_table_borders(table):
+    from docx.oxml.ns import qn
+    from docx.oxml import OxmlElement
+    tbl = table._tbl
+    tblPr = tbl.tblPr
+    borders = OxmlElement("w:tblBorders")
+    for edge in ("top", "left", "bottom", "right", "insideH", "insideV"):
+        el = OxmlElement(f"w:{edge}")
+        el.set(qn("w:val"), "nil")
+        borders.append(el)
+    tblPr.append(borders)
+
+
+def build_nota_dinas_docx(bon):
+    from docx import Document
+    from docx.shared import Pt, Cm
+    from docx.enum.text import WD_ALIGN_PARAGRAPH
+
+    doc = Document()
+    sec = doc.sections[0]
+    sec.page_width = Cm(21.0)
+    sec.page_height = Cm(29.7)
+    sec.top_margin = Cm(1.5)
+    sec.bottom_margin = Cm(1.0)
+    sec.left_margin = Cm(2.0)
+    sec.right_margin = Cm(1.5)
+
+    normal = doc.styles["Normal"]
+    normal.font.name = "Arial"
+    normal.font.size = Pt(12)
+
+    def para(text="", size=12, bold=False, align="center", underline=False, space_after=2):
+        p = doc.add_paragraph()
+        p.alignment = {
+            "center": WD_ALIGN_PARAGRAPH.CENTER,
+            "left": WD_ALIGN_PARAGRAPH.LEFT,
+            "justify": WD_ALIGN_PARAGRAPH.JUSTIFY,
+        }[align]
+        if text:
+            r = p.add_run(text)
+            r.font.name = "Arial"
+            r.font.size = Pt(size)
+            r.bold = bold
+            r.underline = underline
+        p.paragraph_format.space_after = Pt(space_after)
+        return p
+
+    para("KEMENTERIAN IMIGRASI DAN PEMASYARAKATAN REPUBLIK INDONESIA", 13)
+    para("DIREKTORAT JENDERAL PEMASYARAKATAN", 13)
+    para("KANTOR WILAYAH KALIMANTAN TENGAH", 13)
+    para("LEMBAGA PEMASYARAKATAN KELAS IIA PALANGKA RAYA", 13, bold=True)
+    para("Jalan Tjilik Riwut km. 40, Palangka Raya 73221", 11)
+    para("Laman: lapaspalangkaraya.kemenkumham.go.id, Pos-el: lapaspalangkaraya2a@gmail.com", 11, space_after=12)
+
+    para("NOTA DINAS", 14, bold=True, underline=True, space_after=0)
+    para("NOMOR : WP.17.PAS.1.UM.03.04- ", 12, space_after=14)
+
+    dots = "…………………………………………………………"
+
+    t0 = doc.add_table(rows=5, cols=3)
+    labels = ["Kepada", "Dari", "Hal", "Lampiran", "Tanggal"]
+    for i, lab in enumerate(labels):
+        t0.cell(i, 0).text = lab
+        t0.cell(i, 1).text = ":"
+        t0.cell(i, 2).text = dots
+        for c in (0, 1, 2):
+            for p in t0.cell(i, c).paragraphs:
+                for r in p.runs:
+                    r.font.name = "Arial"
+                    r.font.size = Pt(12)
+    _remove_table_borders(t0)
+
+    doc.add_paragraph().paragraph_format.space_after = Pt(6)
+
+    para(
+        "\tBersama ini dengan hormat kami mohon untuk memenuhi kebutuhan barang gudang "
+        "sebagaimana rincian terlampir, guna menunjang kelancaran operasional pada "
+        "Lembaga Pemasyarakatan Kelas IIA Palangka Raya.",
+        12, align="justify", space_after=10,
+    )
+    para("Demikian kami sampaikan, atas perhatiannya diucapkan terima kasih.", 12, align="justify", space_after=24)
+
+    t1 = doc.add_table(rows=1, cols=2)
+    t1.cell(0, 0).text = ""
+    t1.cell(0, 1).text = "Kepala ..................\n\n\n\n\n\n(.........................................)"
+    for p in t1.cell(0, 1).paragraphs:
+        p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+    _remove_table_borders(t1)
+
+    doc.add_paragraph()
+    para("RENCANA KEBUTUHAN", 13, bold=True, space_after=10)
+
+    items = bon.get("items") or []
+    n = max(len(items), 1)
+    t2 = doc.add_table(rows=n + 1, cols=4)
+    t2.style = "Table Grid"
+    headers = ["No", "NAMA BARANG", "JUMLAH KEBUTUHAN", "REALISASI KEBUTUHAN"]
+    for c, h in enumerate(headers):
+        cell = t2.cell(0, c)
+        cell.text = h
+        for p in cell.paragraphs:
+            p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+            for r in p.runs:
+                r.bold = True
+                r.font.name = "Arial"
+                r.font.size = Pt(11)
+
+    if items:
+        for i, it in enumerate(items, 1):
+            t2.cell(i, 0).text = str(i)
+            t2.cell(i, 1).text = it.get("item_name", "")
+            t2.cell(i, 2).text = f"{fmt_num(it.get('qty', 0))} {it.get('unit', '')}".strip()
+            t2.cell(i, 3).text = "…………………………."
+            for c in (0, 1, 2, 3):
+                for p in t2.cell(i, c).paragraphs:
+                    for r in p.runs:
+                        r.font.name = "Arial"
+                        r.font.size = Pt(11)
+    else:
+        t2.cell(1, 0).text = "1"
+        for c in (1, 2, 3):
+            t2.cell(1, c).text = "…………………………."
+
+    doc.add_paragraph()
+    t3 = doc.add_table(rows=2, cols=1)
+    t3.cell(0, 0).text = "Catatan Kepala :"
+    t3.cell(1, 0).text = ""
+    _remove_table_borders(t3)
+
+    doc.add_paragraph()
+    t4 = doc.add_table(rows=2, cols=2)
+    t4.cell(0, 0).text = (
+        "Kepala Sub Bagian Tata Usaha,\n\n\n\n\n\n\nHarjono\nNIP. 196907101991031001"
+    )
+    t4.cell(0, 1).text = (
+        "Palangka Raya, ……………..\n\nKepala Urusan Umum,\n\n\n\n\n\nBoby Rodiarta\nNIP. 198402272010121001"
+    )
+    merged = t4.cell(1, 0).merge(t4.cell(1, 1))
+    merged.text = "Mengetahui,\nKalapas,\n\n\n\n\nHisam Wibowo\nNIP. 197411111997031001"
+    for row in t4.rows:
+        for cell in row.cells:
+            for p in cell.paragraphs:
+                p.alignment = WD_ALIGN_PARAGRAPH.CENTER
+                for r in p.runs:
+                    r.font.name = "Arial"
+                    r.font.size = Pt(11)
+    _remove_table_borders(t4)
+
+    buf = io.BytesIO()
+    doc.save(buf)
+    buf.seek(0)
+    return buf
+
+
+@api_router.get("/bon/{bon_id}/nota-dinas")
+async def bon_nota_dinas(bon_id: str):
+    bon = await db.bon_requests.find_one({"id": bon_id}, {"_id": 0})
+    if not bon:
+        raise HTTPException(status_code=404, detail="Bon tidak ditemukan")
+    buf = build_nota_dinas_docx(bon)
+    filename = f"nota-dinas-bon-{bon_id[:8]}.docx"
+    return StreamingResponse(
+        buf,
+        media_type="application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+# ---------------- Public: medicines (klinik) — perawat login required ----------------
 
 @api_router.get("/medicines")
-async def list_medicines(search: Optional[str] = None):
+async def list_medicines(search: Optional[str] = None, _: str = Depends(require_nurse)):
     q = {}
     if search:
         q = {"name": {"$regex": search, "$options": "i"}}
@@ -265,7 +446,7 @@ async def list_medicines(search: Optional[str] = None):
 
 
 @api_router.post("/medicine-transactions")
-async def create_medicine_transaction(payload: MedicineTransactionPayload):
+async def create_medicine_transaction(payload: MedicineTransactionPayload, _: str = Depends(require_nurse)):
     if payload.type not in ("masuk", "keluar"):
         raise HTTPException(status_code=400, detail="Tipe transaksi tidak valid")
     if payload.qty <= 0:
@@ -297,13 +478,20 @@ async def create_medicine_transaction(payload: MedicineTransactionPayload):
     return doc
 
 
-# ---------------- Admin auth ----------------
+# ---------------- Auth: admin & perawat login ----------------
 
 @api_router.post("/admin/login")
 async def admin_login(payload: LoginPayload):
     if not hmac.compare_digest(payload.password, ADMIN_PASSWORD):
         raise HTTPException(status_code=401, detail="Password salah")
-    return {"token": make_token()}
+    return {"token": make_token("admin")}
+
+
+@api_router.post("/nurse/login")
+async def nurse_login(payload: LoginPayload):
+    if not hmac.compare_digest(payload.password, NURSE_PASSWORD):
+        raise HTTPException(status_code=401, detail="Password salah")
+    return {"token": make_token("nurse")}
 
 
 # ---------------- Admin: items ----------------
