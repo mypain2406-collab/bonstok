@@ -107,19 +107,34 @@ function extractRoomBarcode(text) {
 }
 
 function roomQrDataUrl(barcode) {
-  try {
-    const div = document.createElement("div");
-    new window.QRCode(div, {
-      text: roomBarcodeUrl(barcode),
-      width: 220,
-      height: 220,
-      correctLevel: window.QRCode.CorrectLevel.M,
-    });
-    const img = div.querySelector("img");
-    return (img && img.src) || "";
-  } catch (e) {
-    return "";
-  }
+  // Library QR-nya membuat data URL secara async (deteksi dukungan canvas
+  // butuh satu tick), jadi di-bungkus Promise dengan polling singkat supaya
+  // pasti dapat gambar sebelum dipakai buat cetak.
+  return new Promise((resolve) => {
+    try {
+      const div = document.createElement("div");
+      new window.QRCode(div, {
+        text: roomBarcodeUrl(barcode),
+        width: 220,
+        height: 220,
+        correctLevel: window.QRCode.CorrectLevel.M,
+      });
+      let tries = 0;
+      const check = () => {
+        const img = div.querySelector("img");
+        if (img && img.src) {
+          resolve(img.src);
+        } else if (tries++ < 50) {
+          setTimeout(check, 20);
+        } else {
+          resolve("");
+        }
+      };
+      check();
+    } catch (e) {
+      resolve("");
+    }
+  });
 }
 
 async function printRoomBarcodes(rooms) {
