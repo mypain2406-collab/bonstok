@@ -201,7 +201,10 @@ async def get_item_by_barcode(barcode: str):
 async def list_rooms(search: Optional[str] = None):
     q = {}
     if search:
-        q = {"name": {"$regex": search, "$options": "i"}}
+        q = {"$or": [
+            {"name": {"$regex": search, "$options": "i"}},
+            {"barcode": {"$regex": search, "$options": "i"}},
+        ]}
     rooms = await db.rooms.find(q, {"_id": 0}).sort("name", 1).to_list(500)
     return rooms
 
