@@ -106,9 +106,17 @@ function extractRoomBarcode(text) {
   return text;
 }
 
-async function roomQrDataUrl(barcode) {
+function roomQrDataUrl(barcode) {
   try {
-    return await window.QRCode.toDataURL(roomBarcodeUrl(barcode), { width: 220, margin: 1 });
+    const div = document.createElement("div");
+    new window.QRCode(div, {
+      text: roomBarcodeUrl(barcode),
+      width: 220,
+      height: 220,
+      correctLevel: window.QRCode.CorrectLevel.M,
+    });
+    const img = div.querySelector("img");
+    return (img && img.src) || "";
   } catch (e) {
     return "";
   }
