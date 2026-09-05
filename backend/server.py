@@ -59,7 +59,7 @@ def parse_date_range(start: Optional[str], end: Optional[str]):
     end_dt = None
     if start:
         try:
-            start_dt = Xdatetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+            start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
         except Exception:
             start_dt = None
     if end:
@@ -483,7 +483,7 @@ async def create_medicine_transaction(payload: MedicineTransactionPayload, _: st
         "medicine_id": payload.medicine_id,
         "medicine_name": med["name"],
         "type": payload.type,
-        "qty": payload.qty,X
+        "qty": payload.qty,
         "nurse_name": payload.nurse_name,
         "note": payload.note,
         "created_at": now_iso(),
