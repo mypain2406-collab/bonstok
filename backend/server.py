@@ -12,7 +12,7 @@ from typing import Optional, List
 from dotenv import load_dotenv
 load_dotenv(Path(__file__).parent / ".env")
 
-from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header
+from fastapi import FastAPI, APIRouter, HTTPException, Depends, Header, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
@@ -59,7 +59,7 @@ def parse_date_range(start: Optional[str], end: Optional[str]):
     end_dt = None
     if start:
         try:
-            start_dt = datetime.fromisoformat(start).replace(tzinfo=timezone.utc)
+            start_dt = Xdatetime.fromisoformat(start).replace(tzinfo=timezone.utc)
         except Exception:
             start_dt = None
     if end:
@@ -124,6 +124,18 @@ class ItemPayload(BaseModel):
     current_stock: float = 0
     min_stock: float = 0
     photo: Optional[str] = None
+
+
+class ImportCommitRow(BaseModel):
+    bmn_code: str
+    name: str
+    unit: str
+    action: str  # "create" | "update" | "skip"
+    item_id: Optional[str] = None  # wajib diisi kalau action == "update"
+
+
+class ImportCommitPayload(BaseModel):
+    rows: List[ImportCommitRow]
 
 
 class BonItemLine(BaseModel):
@@ -471,7 +483,7 @@ async def create_medicine_transaction(payload: MedicineTransactionPayload, _: st
         "medicine_id": payload.medicine_id,
         "medicine_name": med["name"],
         "type": payload.type,
-        "qty": payload.qty,
+        "qty": payload.qty,X
         "nurse_name": payload.nurse_name,
         "note": payload.note,
         "created_at": now_iso(),
@@ -537,6 +549,129 @@ async def admin_update_item(item_id: str, payload: ItemPayload, _: bool = Depend
 async def admin_delete_item(item_id: str, _: bool = Depends(require_admin)):
     await db.items.delete_one({"id": item_id})
     return {"ok": True}
+
+
+# ---------------- Admin: bulk import nama barang dari PDF ----------------
+# Menerima file PDF hasil export "Rincian Buku Persediaan" (satu barang per
+# halaman, format KODE BARANG / NAMA BARANG / SATUAN). Alur dua langkah:
+# 1) /import-preview: baca PDF, cocokkan dengan barang yang sudah ada (lewat
+#    bmn_code lalu fallback nama persis), kembalikan daftar untuk ditinjau.
+# 2) /import-commit: admin sudah meninjau (dan bisa mengedit/batal per baris)
+#    di frontend, baru di sini datanya benar-benar disimpan ke database.
+
+def _parse_persediaan_pdf(content: bytes):
+    import pdfplumber
+
+    rows = []
+    with pdfplumber.open(io.BytesIO(content)) as pdf:
+        for page in pdf.pages:
+            text = page.extract_text() or ""
+            kode_m = re.search(r"KODE BARANG\s*:\s*(\S+)", text)
+            nama_m = re.search(r"NAMA BARANG\s*:\s*(.+)", text)
+            satuan_m = re.search(r"SATUAN\s*:\s*(.+)", text)
+            if not kode_m or not nama_m:
+                continue
+            bmn_code = kode_m.group(1).strip()
+            name = nama_m.group(1).strip()
+            unit = satuan_m.group(1).strip() if satuan_m else "pcs"
+            if not name:
+                continue
+            rows.append({"bmn_code": bmn_code, "name": name, "unit": unit})
+    return rows
+
+
+@api_router.post("/admin/items/import-preview")
+async def admin_items_import_preview(file: UploadFile = File(...), _: bool = Depends(require_admin)):
+    if not (file.filename or "").lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="File harus berupa PDF")
+    content = await file.read()
+    try:
+        rows = _parse_persediaan_pdf(content)
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Gagal membaca PDF: {e}")
+
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="Tidak ada data barang yang terbaca dari PDF ini. Pastikan file adalah export Rincian Buku Persediaan (satu barang per halaman, ada KODE BARANG & NAMA BARANG).",
+        )
+
+    codes = [r["bmn_code"] for r in rows]
+    names = [r["name"] for r in rows]
+    existing_by_code = {}
+    async for it in db.items.find({"bmn_code": {"$in": codes}}, {"_id": 0}):
+        existing_by_code[it.get("bmn_code")] = it
+    existing_by_name = {}
+    async for it in db.items.find({"name": {"$in": names}}, {"_id": 0}):
+        existing_by_name.setdefault(it["name"].strip().lower(), it)
+
+    result = []
+    for r in rows:
+        match = existing_by_code.get(r["bmn_code"]) or existing_by_name.get(r["name"].strip().lower())
+        result.append({
+            "bmn_code": r["bmn_code"],
+            "name": r["name"],
+            "unit": r["unit"],
+            "existing": ({
+                "id": match["id"],
+                "name": match["name"],
+                "unit": match.get("unit"),
+                "current_stock": match.get("current_stock", 0),
+                "bmn_code": match.get("bmn_code"),
+            } if match else None),
+        })
+    return {"total": len(result), "rows": result}
+
+
+@api_router.post("/admin/items/import-commit")
+async def admin_items_import_commit(payload: ImportCommitPayload, _: bool = Depends(require_admin)):
+    created, updated, skipped = 0, 0, 0
+    for row in payload.rows:
+        name = (row.name or "").strip()
+        unit = (row.unit or "").strip() or "pcs"
+
+        if row.action == "update" and row.item_id and name:
+            existing = await db.items.find_one({"id": row.item_id})
+            if not existing:
+                skipped += 1
+                continue
+            await db.items.update_one(
+                {"id": row.item_id},
+                {"$set": {"name": name, "unit": unit, "bmn_code": row.bmn_code, "updated_at": now_iso()}},
+            )
+            updated += 1
+        elif row.action == "create" and name:
+            dup_code = await db.items.find_one({"bmn_code": row.bmn_code})
+            if dup_code:
+                await db.items.update_one(
+                    {"id": dup_code["id"]},
+                    {"$set": {"name": name, "unit": unit, "updated_at": now_iso()}},
+                )
+                updated += 1
+                continue
+            barcode = f"AUTO-{new_id()[:8].upper()}"
+            while await db.items.find_one({"barcode": barcode}):
+                barcode = f"AUTO-{new_id()[:8].upper()}"
+            doc = {
+                "id": new_id(),
+                "name": name,
+                "barcode": barcode,
+                "bmn_code": row.bmn_code,
+                "unit": unit,
+                "category": None,
+                "current_stock": 0,
+                "min_stock": 0,
+                "photo": None,
+                "created_at": now_iso(),
+            }
+            await db.items.insert_one(doc)
+            created += 1
+        else:
+            skipped += 1
+
+    return {"created": created, "updated": updated, "skipped": skipped}
 
 
 # ---------------- Admin: stock in & item transactions (persediaan) ----------------
