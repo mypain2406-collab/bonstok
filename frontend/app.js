@@ -40,7 +40,7 @@ function Header() {
     <header className="border-b border-neutral-200 bg-white sticky top-0 z-20">
       <div className="max-w-4xl mx-auto px-4 py-4 flex items-center justify-between flex-wrap gap-3">
         <a href="#/" className="flex items-center gap-2">
-          <span className="text-2xl font-black tracking-tight">BonStok</span>
+          <span className="text-2xl font-black tracking-tight">Bon Persediaan</span>
         </a>
       </div>
     </header>
@@ -83,7 +83,7 @@ function useToast() {
 }
 
 // ---------------- Barcode helpers (rooms) ----------------
-// Barcode ruangan berupa QR code yang berisi LINK langsung ke BonStok dengan
+// Barcode ruangan berupa QR code yang berisi LINK langsung ke Bon Persediaan dengan
 // ruangan sudah otomatis terisi (?rb=<kode>). Jadi cukup discan pakai kamera
 // HP biasa (bukan harus dari dalam aplikasi) untuk langsung membuka halaman
 // bon dengan ruangan sudah terisi.
@@ -147,7 +147,7 @@ async function printRoomBarcodes(rooms) {
       <img src="${qrUrls[i]}" style="max-width:100%;" />
       <div style="font-size:10px;color:#999;margin-top:6px;word-break:break-all;">${roomBarcodeUrl(r.barcode)}</div>
     </div>`).join("");
-  win.document.write(`<!DOCTYPE html><html><head><title>Barcode Ruangan - BonStok</title>
+  win.document.write(`<!DOCTYPE html><html><head><title>Barcode Ruangan - Bon Persediaan</title>
     <style>body{font-family:sans-serif;padding:16px;} @media print { body { padding: 0; } }</style>
     </head><body>${cards}</body></html>`);
   win.document.close();
@@ -202,6 +202,18 @@ function ScannerModal({ onDetected, onClose, title, hint }) {
   );
 }
 
+// Urutkan daftar barang: yang stoknya 0 (habis) ditaruh paling bawah, sisanya
+// tetap dalam urutan aslinya (alfabetis, dari backend) karena Array.sort di JS
+// stabil sejak ES2019.
+function sortItemsByStock(items) {
+    return [...items].sort((a, b) => {
+          const aOut = (a.current_stock || 0) <= 0;
+          const bOut = (b.current_stock || 0) <= 0;
+          if (aOut === bOut) return 0;
+          return aOut ? 1 : -1;
+    });
+}
+
 // ---------------- Gudang (warehouse bon) — kiosk-style user flow ----------------
 
 function GudangPage() {
@@ -214,6 +226,7 @@ function GudangPage() {
   const [roomSearchQ, setRoomSearchQ] = useState("");
   const [roomSearchResults, setRoomSearchResults] = useState([]);
   const [cart, setCart] = useState([]); // [{item_id, name, unit, qty, current_stock}]
+  const [itemQuery, setItemQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
   const [submitting, setSubmitting] = useState(false);
@@ -282,22 +295,26 @@ function GudangPage() {
     });
   };
 
-  const doSearch = async (q) => {
-    if (!q) {
-      setSearchResults([]);
-      return;
-    }
-    setSearching(true);
-    try {
-      const r = await fetch(`${API_BASE}/items?search=${encodeURIComponent(q)}`);
-      const data = await r.json();
-      setSearchResults(data);
-    } catch (err) {
-      setSearchResults([]);
-    } finally {
-      setSearching(false);
-    }
-  };
+const doSearch = async (q) => {
+      setItemQuery(q);
+      setSearching(true);
+      try {
+              const url = q ? `${API_BASE}/items?search=${encodeURIComponent(q)}` : `${API_BASE}/items`;
+              const r = await fetch(url);
+              const data = await r.json();
+              setSearchResults(sortItemsByStock(data));
+      } catch (err) {
+              setSearchResults([]);
+      } finally {
+              setSearching(false);
+      }
+};
+
+    useEffect(() => {
+          if (room) {
+                  doSearch("");
+          }
+    }, [room]);
 
   const updateQty = (item_id, qty) => {
     setCart((prev) => prev.map((c) => (c.item_id === item_id ? { ...c, qty: Math.max(1, qty) } : c)));
@@ -397,7 +414,7 @@ function GudangPage() {
         <div className="space-y-4">
           <Card>
             <div className="space-y-4">
-              <Field label="Nama Peminta">
+              <Field label="Nama">
                 <input className={inputCls} value={requesterName} onChange={(e) => setRequesterName(e.target.value)} placeholder="Nama Anda" />
               </Field>
 
@@ -458,28 +475,40 @@ function GudangPage() {
           {room && (
             <Card>
               <Field label="Cari nama barang persediaan">
-                <input
-                  className={inputCls}
-                  placeholder="Ketik nama barang..."
-                  onChange={(e) => doSearch(e.target.value)}
-                  autoFocus
-                />
-              </Field>
-              {searching && <div className="text-xs text-neutral-400 mt-2">Mencari...</div>}
-              {searchResults.length > 0 && (
-                <div className="mt-2 border border-neutral-200 rounded-lg divide-y divide-neutral-100 max-h-64 overflow-y-auto">
-                  {searchResults.map((it) => (
-                    <button
-                      key={it.id}
-                      onClick={() => { addToCart(it); showToast(`${it.name} ditambahkan`); }}
-                      className="w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 flex justify-between items-center"
-                    >
-                      <span>{it.name}</span>
-                      <span className="text-xs text-neutral-400">Stok tersedia: {fmtNum(it.current_stock)} {it.unit}</span>
-                    </button>
-                  ))}
-                </div>
-              )}
+                            <input
+                              className={inputCls}
+                                                  placeholder="Ketik nama barang, atau lihat semua di bawah..."
+                                                                      value={itemQuery}
+                                                                                          onChange={(e) => doSearch(e.target.value)}
+                                                                                                              autoFocus
+                                                                                                                                />
+                                                                                                                </Field>
+           {searching && <div className="text-xs text-neutral-400 mt-2">Mencari...</div>}
+                           <div className="mt-2 border border-neutral-200 rounded-lg divide-y divide-neutral-100 max-h-72 overflow-y-auto">
+           {searchResults.length === 0 && !searching && (
+                               <div className="px-3 py-4 text-sm text-neutral-400 text-center">Tidak ada barang ditemukan.</div>
+                             )}
+           {searchResults.map((it) => {
+                               const outOfStock = (it.current_stock || 0) <= 0;
+                               return (
+                                                     <button
+                                                       key={it.id}
+                                                    onClick={() => { addToCart(it); showToast(`${it.name} ditambahkan`); }}
+                                   className="w-full text-left px-3 py-2 text-sm hover:bg-neutral-50 flex items-center gap-3"
+                                                         >
+                                   {it.photo ? (
+                                                             <img src={it.photo} alt={it.name} className="w-10 h-10 rounded-lg object-cover border border-neutral-200 flex-shrink-0" />
+                                   ) : (
+                                                             <div className="w-10 h-10 rounded-lg bg-neutral-100 border border-neutral-200 flex items-center justify-center text-neutral-300 text-lg flex-shrink-0">[img]</div>
+                                                           )}
+                        <span className="flex-1">{it.name}</span>
+                                                <span className={`text-xs flex-shrink-0 ${outOfStock ? "text-red-500 font-bold" : "text-neutral-400"}`}>
+{outOfStock ? "Stok habis" : `Stok: ${fmtNum(it.current_stock)} ${it.unit}`}
+</span>
+  </button>
+                    );
+})}
+  </div>
             </Card>
           )}
         </div>
@@ -748,7 +777,7 @@ function AdminLogin({ onLogin }) {
 
   return (
     <div className="max-w-sm mx-auto px-4 py-24">
-      <h1 className="text-2xl font-black">Admin BonStok</h1>
+      <h1 className="text-2xl font-black">Admin Bon Persediaan</h1>
       <form onSubmit={submit} className="mt-6 space-y-4">
         <Field label="Password">
           <input type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
