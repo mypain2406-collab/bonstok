@@ -83,24 +83,46 @@ function useToast() {
 }
 
 // ---------------- Barcode helpers (rooms) ----------------
+// Barcode ruangan berupa QR code yang berisi LINK langsung ke BonStok dengan
+// ruangan sudah otomatis terisi (?rb=<kode>). Jadi cukup discan pakai kamera
+// HP biasa (bukan harus dari dalam aplikasi) untuk langsung membuka halaman
+// bon dengan ruangan sudah terisi.
 
-function barcodeDataUrl(value) {
+function roomBarcodeUrl(barcode) {
+  return `${window.location.origin}${window.location.pathname}?rb=${encodeURIComponent(barcode)}`;
+}
+
+// Kalau yang kescan/keketik ternyata link lengkap (?rb=KODE), ambil KODE-nya
+// saja. Kalau bukan link, anggap itu memang kode barcode mentah.
+function extractRoomBarcode(text) {
+  if (!text) return text;
   try {
-    const canvas = document.createElement("canvas");
-    window.JsBarcode(canvas, value, { format: "CODE128", displayValue: true, fontSize: 14, height: 60, margin: 8 });
-    return canvas.toDataURL("image/png");
+    const url = new URL(text);
+    const rb = url.searchParams.get("rb");
+    if (rb) return rb;
+  } catch (e) {
+    // bukan URL, pakai apa adanya
+  }
+  return text;
+}
+
+async function roomQrDataUrl(barcode) {
+  try {
+    return await window.QRCode.toDataURL(roomBarcodeUrl(barcode), { width: 220, margin: 1 });
   } catch (e) {
     return "";
   }
 }
 
-function printRoomBarcodes(rooms) {
+async function printRoomBarcodes(rooms) {
   const win = window.open("", "_blank");
   if (!win) return;
-  const cards = rooms.map((r) => `
+  const qrUrls = await Promise.all(rooms.map((r) => roomQrDataUrl(r.barcode)));
+  const cards = rooms.map((r, i) => `
     <div style="display:inline-block;border:1px solid #ccc;border-radius:10px;padding:14px;margin:8px;text-align:center;width:230px;vertical-align:top;">
       <div style="font-weight:700;font-size:14px;margin-bottom:8px;">${r.name}</div>
-      <img src="${barcodeDataUrl(r.barcode)}" style="max-width:100%;" />
+      <img src="${qrUrls[i]}" style="max-width:100%;" />
+      <div style="font-size:10px;color:#999;margin-top:6px;word-break:break-all;">${roomBarcodeUrl(r.barcode)}</div>
     </div>`).join("");
   win.document.write(`<!DOCTYPE html><html><head><title>Barcode Ruangan - BonStok</title>
     <style>body{font-family:sans-serif;padding:16px;} @media print { body { padding: 0; } }</style>
@@ -174,8 +196,9 @@ function GudangPage() {
   const [submitting, setSubmitting] = useState(false);
   const [submittedBon, setSubmittedBon] = useState(null);
 
-  const lookupRoomBarcode = async (code) => {
-    if (!code) return;
+  const lookupRoomBarcode = async (raw) => {
+    if (!raw) return;
+    const code = extractRoomBarcode(String(raw).trim());
     try {
       const r = await fetch(`${API_BASE}/rooms/by-barcode/${encodeURIComponent(code)}`);
       if (!r.ok) {
@@ -195,6 +218,21 @@ function GudangPage() {
     lookupRoomBarcode(roomBarcodeInput.trim());
     setRoomBarcodeInput("");
   };
+
+  // Kalau halaman dibuka lewat link dari barcode ruangan (?rb=KODE), yang
+  // biasanya discan langsung pakai kamera HP, ruangan otomatis terisi tanpa
+  // perlu scan ulang di dalam aplikasi.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const rb = params.get("rb");
+    if (rb) {
+      lookupRoomBarcode(rb);
+      const url = new URL(window.location.href);
+      url.searchParams.delete("rb");
+      window.history.replaceState({}, "", url.toString());
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   const doSearchRoom = async (q) => {
     setRoomSearchQ(q);
@@ -329,7 +367,7 @@ function GudangPage() {
     <div className="max-w-4xl mx-auto px-4 py-10">
       <div className="text-xs font-bold uppercase tracking-[0.3em] text-neutral-500">📦 Gudang</div>
       <h1 className="text-3xl font-black tracking-tight mt-2">Ajukan Bon Barang</h1>
-      <p className="text-neutral-600 mt-2">Scan barcode ruangan untuk identitas peminta, pilih barang lewat pencarian nama, lalu ajukan bon untuk disetujui admin.</p>
+      <p className="text-neutral-600 mt-2">Scan barcode QR yang ditempel di ruangan pakai kamera HP — ruangan otomatis terisi. Lalu pilih barang lewat pencarian nama, dan ajukan bon untuk disetujui admin.</p>
       <p className="text-sm text-neutral-500 mt-2">{tanggalStr} — {jamStr}</p>
 
       <div className="grid lg:grid-cols-2 gap-6 mt-8">
