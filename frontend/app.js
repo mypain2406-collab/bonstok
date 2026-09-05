@@ -222,10 +222,10 @@ function GudangPage() {
   const [requesterName, setRequesterName] = useState("");
   const [room, setRoom] = useState(null); // { id, name, barcode }
   const [showRoomScanner, setShowRoomScanner] = useState(false);
-  const [roomBarcodeInput, setRoomBarcodeInput] = useState("");
-  const [roomSearchQ, setRoomSearchQ] = useState("");
-  const [roomSearchResults, setRoomSearchResults] = useState([]);
-  const [cart, setCart] = useState([]); // [{item_id, name, unit, qty, current_stock}]
+  const [roomQuery, setRoomQuery] = useState("");
+  const [roomOptions, setRoomOptions] = useState([]);
+  const [loadingRooms, setLoadingRooms] = useState(false);
+  const [cart, setCart] = useState([]); // [{item_id, name, unit, qty, current_stock, photo}]
   const [itemQuery, setItemQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -249,12 +249,6 @@ function GudangPage() {
     }
   };
 
-  const onRoomBarcodeSubmit = (e) => {
-    e.preventDefault();
-    lookupRoomBarcode(roomBarcodeInput.trim());
-    setRoomBarcodeInput("");
-  };
-
   // Kalau halaman dibuka lewat link dari barcode ruangan (?rb=KODE), yang
   // biasanya discan langsung pakai kamera HP, ruangan otomatis terisi tanpa
   // perlu scan ulang di dalam aplikasi.
@@ -270,19 +264,43 @@ function GudangPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
+  // Satu pencarian ini dipakai untuk kode ruangan (hasil scan alat) MAUPUN
+  // nama ruangan — backend sudah mencocokkan keduanya. Kalau kotak kosong,
+  // tampilkan semua ruangan supaya dropdown-nya langsung terisi.
   const doSearchRoom = async (q) => {
-    setRoomSearchQ(q);
-    if (!q) {
-      setRoomSearchResults([]);
-      return;
-    }
+    setRoomQuery(q);
+    setLoadingRooms(true);
     try {
-      const r = await fetch(`${API_BASE}/rooms?search=${encodeURIComponent(q)}`);
+      const url = q ? `${API_BASE}/rooms?search=${encodeURIComponent(q)}` : `${API_BASE}/rooms`;
+      const r = await fetch(url);
       const data = await r.json();
-      setRoomSearchResults(data);
+      setRoomOptions(data);
     } catch (err) {
-      setRoomSearchResults([]);
+      setRoomOptions([]);
+    } finally {
+      setLoadingRooms(false);
     }
+  };
+
+  // Begitu halaman dibuka, langsung muat semua ruangan supaya dropdown
+  // terisi tanpa harus mengetik apa-apa dulu.
+  useEffect(() => {
+    doSearchRoom("");
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Kalau hasil scan/ketik pas Enter, langsung pilih ruangan yang paling
+  // cocok (biasanya cuma ada 1 hasil kalau ketik/scan kode persis).
+  const onRoomQueryKeyDown = (e) => {
+    if (e.key === "Enter" && roomOptions.length > 0) {
+      e.preventDefault();
+      setRoom(roomOptions[0]);
+    }
+  };
+
+  const onRoomSelectChange = (e) => {
+    const rm = roomOptions.find((r) => r.id === e.target.value);
+    if (rm) setRoom(rm);
   };
 
   const addToCart = (item) => {
@@ -291,30 +309,36 @@ function GudangPage() {
       if (existing) {
         return prev.map((c) => (c.item_id === item.id ? { ...c, qty: c.qty + 1 } : c));
       }
-      return [...prev, { item_id: item.id, name: item.name, unit: item.unit, qty: 1, current_stock: item.current_stock }];
+      return [...prev, { item_id: item.id, name: item.name, unit: item.unit, qty: 1, current_stock: item.current_stock, photo: item.photo || null }];
     });
   };
 
-const doSearch = async (q) => {
-      setItemQuery(q);
-      setSearching(true);
-      try {
-              const url = q ? `${API_BASE}/items?search=${encodeURIComponent(q)}` : `${API_BASE}/items`;
-              const r = await fetch(url);
-              const data = await r.json();
-              setSearchResults(sortItemsByStock(data));
-      } catch (err) {
-              setSearchResults([]);
-      } finally {
-              setSearching(false);
-      }
-};
+  const doSearch = async (q) => {
+    setItemQuery(q);
+    setSearching(true);
+    try {
+      // Kalau kotak pencarian kosong, tetap tampilkan SEMUA barang persediaan
+      // (bukan dikosongkan) supaya user bisa scroll lihat semua referensi barang.
+      const url = q ? `${API_BASE}/items?search=${encodeURIComponent(q)}` : `${API_BASE}/items`;
+      const r = await fetch(url);
+      const data = await r.json();
+      setSearchResults(sortItemsByStock(data));
+    } catch (err) {
+      setSearchResults([]);
+    } finally {
+      setSearching(false);
+    }
+  };
 
-    useEffect(() => {
-          if (room) {
-                  doSearch("");
-          }
-    }, [room]);
+  // Begitu ruangan terisi (baik lewat scan QR, ketik kode, atau pilih dari
+  // pencarian), langsung muat semua barang persediaan supaya listnya
+  // terlihat tanpa harus mengetik apa-apa dulu.
+  useEffect(() => {
+    if (room) {
+      doSearch("");
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [room]);
 
   const updateQty = (item_id, qty) => {
     setCart((prev) => prev.map((c) => (c.item_id === item_id ? { ...c, qty: Math.max(1, qty) } : c)));
@@ -425,19 +449,75 @@ const doSearch = async (q) => {
                       <div className="text-sm font-bold">{room.name}</div>
                       <div className="text-xs text-neutral-400">{room.barcode}</div>
                     </div>
-                    <button onClick={() => setRoom(null)} className="text-xs font-bold uppercase underline">Ganti</button>
-                  </div>
-                ) : (
-                  <div>
-                    <form onSubmit={onRoomBarcodeSubmit} className="flex gap-2">
-                      <input
-                        className={inputCls}
-                        value={roomBarcodeInput}
-                        onChange={(e) => setRoomBarcodeInput(e.target.value)}
-                        placeholder="Scan pakai alat, atau ketik kode ruangan lalu Enter"
-                        autoFocus
-                      />
-                      <button type="submit" className="bg-neutral-900 text-white text-xs font-bold uppercase px-4 rounded-lg whitespace-nowrap">Cari</button>
+<button onClick={() => { setRoom(null); doSearchRoom(""); }} className="text-xs font-bold uppercase underline">Ganti</button>
+    </div>
+    ) : (
+      <div>
+      <input
+      className={inputCls}
+        value={roomQuery}
+          onChange={(e) => doSearchRoom(e.target.value)}
+            onKeyDown={onRoomQueryKeyDown}
+              placeholder="Scan/ketik kode ruangan, atau cari nama ruangan..."
+                autoFocus
+                  />
+                  <select
+                  className={`${inputCls} mt-2`}
+value=""
+  onChange={onRoomSelectChange}
+    >
+    <option value="">
+  {loadingRooms ? "Memuat..." : roomOptions.length === 0 ? "Ruangan tidak ditemukan" : "-- Pilih ruangan --"}
+</option>
+{roomOptions.map((rm) => (
+  <option key={rm.id} value={rm.id}>{rm.name} ({rm.barcode})</option>
+  ))}
+    </select>
+    <button
+    onClick={() => setShowRoomScanner(true)}
+      className="mt-3 w-full border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase tracking-wider hover:bg-neutral-50"
+        >
+        📷 Scan Barcode Ruangan
+        </button>
+        </div>
+        )}
+          </Field>
+          </div>
+          </Card>
+
+{room && (
+  <Card>
+  <Field label="Cari nama barang persediaan">
+  <input
+  className={inputCls}
+    placeholder="Ketik nama barang, atau lihat semua di bawah..."
+      value={itemQuery}
+        onChange={(e) => doSearch(e.target.value)}
+          autoFocus
+            />
+            </Field>
+ {searching && <div className="text-xs text-neutral-400 mt-2">Mencari...</div>}
+   <select
+   className={`${inputCls} mt-2`}
+ value=""
+   onChange={(e) => {
+     const it = searchResults.find((x) => x.id === e.target.value);
+     if (it) { addToCart(it); showToast(`${it.name} ditambahkan`); }
+   }}
+     >
+     <option value="">
+   {searching ? "Memuat..." : searchResults.length === 0 ? "Tidak ada barang ditemukan" : "-- Pilih barang untuk ditambahkan --"}
+</option>
+{searchResults.map((it) => {
+  const outOfStock = (it.current_stock || 0) <= 0;
+  return (
+    <option key={it.id} value={it.id}>
+{it.name} — {outOfStock ? "Stok habis" : `Stok: ${fmtNum(it.current_stock)} ${it.unit}`}
+</option>
+  );
+})}
+  </select>
+  </Card>
                     </form>
                     <button
                       onClick={() => setShowRoomScanner(true)}
@@ -519,6 +599,11 @@ const doSearch = async (q) => {
           <div className="space-y-3">
             {cart.map((c) => (
               <div key={c.item_id} className="flex items-center gap-3 border-b border-neutral-100 pb-3 last:border-0">
+          {c.photo ? (
+            <img src={c.photo} alt={c.name} className="w-9 h-9 rounded-lg object-cover border border-neutral-200 flex-shrink-0" />
+            ) : (
+              <div className="w-9 h-9 rounded-lg bg-neutral-100 border border-neutral-200 flex items-center justify-center text-neutral-300 text-xs flex-shrink-0">[img]</div>
+              )}
                 <div className="flex-1">
                   <div className="text-sm font-semibold">{c.name}</div>
                   <div className="text-xs text-neutral-400">Stok tersedia: {fmtNum(c.current_stock)} {c.unit}</div>
