@@ -1157,6 +1157,38 @@ def _med_looks_like_gov_persediaan_excel(content: bytes) -> bool:
     return False
 
 
+def _med_extract_bmn_stock_from_gov_excel(content: bytes):
+    """Ekstrak {bmn_code: stok_akhir} langsung dari struktur baris export
+    Excel "Rincian Buku Persediaan" (SIMAK BMN). Format ini tidak menyimpan
+    nama barang sebagai data sel, tapi kode BMN dan angka stok akhir tetap
+    ada di posisi kolom yang tetap: kode BMN di kolom index 26 pada baris
+    "KODE UAKPB : ...", dan stok akhir (Saldo Akhir - Unit) di kolom index
+    22 pada baris ringkasan "Jumlah" dalam blok barang yang sama. Divalidasi
+    455/455 cocok persis dengan pdf_stock dari _parse_persediaan_pdf pada
+    laporan yang sama."""
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(content), data_only=True)
+    code_re = re.compile(r"^\d+(\.\d+)+$")
+    result = {}
+    for ws in wb.worksheets:
+        rows = [list(r) for r in ws.iter_rows(values_only=True)]
+        code_row_idxs = [
+            i for i, row in enumerate(rows)
+            if len(row) > 26 and isinstance(row[26], str) and code_re.match(row[26].strip())
+        ]
+        for bi, start in enumerate(code_row_idxs):
+            end = code_row_idxs[bi + 1] if bi + 1 < len(code_row_idxs) else len(rows)
+            bmn_code = rows[start][26].strip()
+            for r in range(start, end):
+                row = rows[r]
+                if len(row) > 2 and str(row[2]).strip() == "Jumlah":
+                    qty = row[22] if len(row) > 22 else None
+                    if isinstance(qty, (int, float)):
+                        result[bmn_code] = result.get(bmn_code, 0) + qty
+                    break
+    return result
+
+
 def _parse_medicine_excel(content: bytes):
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(content), data_only=True)
@@ -1249,13 +1281,45 @@ async def admin_medicines_import_preview(file: UploadFile = File(...), _: bool =
     except Exception as e:
         raise HTTPException(status_code=400, detail=f"Gagal membaca file: {e}")
 
-    if not rows:
-        is_excel = filename.endswith(".xlsx") or filename.endswith(".xlsm") or filename.endswith(".xls")
-        if is_excel and _med_looks_like_gov_persediaan_excel(content):
+    note = None
+    unresolved_bmn_count = 0
+    is_excel = filename.endswith(".xlsx") or filename.endswith(".xlsm") or filename.endswith(".xls")
+
+    if not rows and is_excel and _med_looks_like_gov_persediaan_excel(content):
+        # Nama barang memang tidak ada sebagai data di file ini (keterbatasan
+        # sistem sumber BMN), tapi kode BMN + stok akhir tetap bisa dibaca.
+        # Kalau barang itu sudah pernah didaftarkan lewat import PDF Persediaan
+        # (yang menyimpan bmn_code), kita bisa cocokkan kode BMN itu ke barang
+        # yang sudah terdaftar dan otomatis isi nama + satuannya, sehingga
+        # Excel ini tetap bisa dipakai tanpa harus upload ulang versi PDF.
+        bmn_stock = _med_extract_bmn_stock_from_gov_excel(content)
+        codes = list(bmn_stock.keys())
+        items_by_code = {}
+        if codes:
+            async for it in db.items.find({"bmn_code": {"$in": codes}}, {"_id": 0}):
+                if it.get("bmn_code"):
+                    items_by_code[it["bmn_code"]] = it
+        resolved_rows = []
+        for code, stock in bmn_stock.items():
+            item = items_by_code.get(code)
+            if item:
+                resolved_rows.append({"name": item["name"], "stock": stock, "unit": item.get("unit")})
+            else:
+                unresolved_bmn_count += 1
+        if resolved_rows:
+            rows = resolved_rows
+            note = (
+                f"File Excel ini adalah export \"Rincian Buku Persediaan\" yang tidak menyertakan nama barang sebagai data — "
+                f"nama & satuan {len(resolved_rows)} barang di bawah ini diisi otomatis dengan mencocokkan kode BMN ke data Barang Persediaan yang sudah terdaftar."
+                + (f" {unresolved_bmn_count} kode BMN lain di file ini belum ditemukan padanannya (barang tersebut belum pernah diimpor lewat menu Persediaan), jadi dilewati." if unresolved_bmn_count else "")
+            )
+        else:
             raise HTTPException(
                 status_code=400,
-                detail='File Excel ini terdeteksi sebagai export "Rincian Buku Persediaan" dari sistem BMN, tapi export Excel dari laporan ini tidak menyertakan nama barang sebagai data (hanya kode BMN) — ini keterbatasan sistem sumbernya, bukan file yang rusak. Silakan upload versi PDF dari laporan yang sama (PDF-nya menyertakan nama barang secara lengkap), atau gunakan file Excel/Word dengan kolom nama & stok yang jelas.',
+                detail='File Excel ini terdeteksi sebagai export "Rincian Buku Persediaan" dari sistem BMN, tapi export Excel dari laporan ini tidak menyertakan nama barang sebagai data (hanya kode BMN) — ini keterbatasan sistem sumbernya, bukan file yang rusak. Tidak ada satu pun kode BMN di file ini yang cocok dengan Barang Persediaan yang sudah terdaftar (jadi nama tidak bisa diisi otomatis). Silakan upload versi PDF dari laporan yang sama (PDF-nya menyertakan nama barang secara lengkap), impor dulu lewat menu Persediaan, atau gunakan file Excel/Word dengan kolom nama & stok yang jelas.',
             )
+
+    if not rows:
         raise HTTPException(
             status_code=400,
             detail="Tidak ada data nama obat & stok yang terbaca dari file ini. Pastikan file berisi daftar/tabel dengan nama obat dan jumlah stok yang jelas.",
@@ -1297,7 +1361,7 @@ async def admin_medicines_import_preview(file: UploadFile = File(...), _: bool =
                 "current_stock": match.get("current_stock", 0),
             } if match else None),
         })
-    return {"total": len(result), "rows": result}
+    return {"total": len(result), "rows": result, "note": note}
 
 
 class MedicineImportCommitRow(BaseModel):
