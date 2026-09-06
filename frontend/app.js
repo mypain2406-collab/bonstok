@@ -815,8 +815,7 @@ function StatCard({ label, value, alert }) {
 
 const TABS = [
   { key: "bon", label: "Approval Bon" },
-  { key: "items", label: "Barang Gudang" },
-  { key: "persediaan", label: "Persediaan" },
+  { key: "items", label: "Persediaan" },
   { key: "rooms", label: "Ruangan" },
   { key: "medicines", label: "Obat Klinik" },
   { key: "history", label: "Riwayat Obat" },
@@ -829,6 +828,7 @@ function ImportItemsPanel({ authHeaders, onImported }) {
   const [committing, setCommitting] = useState(false);
   const [result, setResult] = useState(null);
   const [error, setError] = useState("");
+  const [onlyWithStock, setOnlyWithStock] = useState(true);
 
   const doPreview = async () => {
     if (!file) return;
@@ -865,6 +865,13 @@ function ImportItemsPanel({ authHeaders, onImported }) {
     setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
   };
 
+// Barang dianggap "masih ada stok" berdasarkan angka saldo terakhir yang
+  // terbaca dari PDF (pdf_stock). Kalau filter aktif, barang dengan stok PDF
+  // 0/kosong disembunyikan dari tabel DAN tidak ikut diimpor, walau checkbox
+  // include-nya masih true di state.
+  const hasStock = (r) => (r.pdf_stock || 0) > 0;
+  const effectiveInclude = (r) => r.include && (!onlyWithStock || hasStock(r));
+
   const doCommit = async () => {
     if (!rows) return;
     setCommitting(true);
@@ -874,7 +881,7 @@ function ImportItemsPanel({ authHeaders, onImported }) {
         bmn_code: r.bmn_code,
         name: r.name,
         unit: r.unit,
-        action: r.include ? r.action : "skip",
+        action: effectiveInclude(r) ? r.action : "skip",
         item_id: r.existing ? r.existing.id : null,
       }));
       const resp = await fetch(`${API_BASE}/admin/items/import-commit`, {
@@ -898,7 +905,11 @@ function ImportItemsPanel({ authHeaders, onImported }) {
     }
   };
 
-  const includedCount = rows ? rows.filter((r) => r.include).length : 0;
+  const includedCount = rows ? rows.filter(effectiveInclude).length : 0;
+  const withStockCount = rows ? rows.filter(hasStock).length : 0;
+  const visibleRows = rows
+    ? rows.map((r, idx) => ({ ...r, _idx: idx })).filter((r) => !onlyWithStock || hasStock(r))
+    : null;
 
   return (
     <div className="bg-white border border-neutral-200 rounded-2xl p-4 mb-4">
@@ -932,39 +943,47 @@ function ImportItemsPanel({ authHeaders, onImported }) {
 
       {rows && (
         <div className="mt-4">
-          <div className="text-xs text-neutral-500 mb-2">{rows.length} barang terbaca dari PDF, {includedCount} dipilih untuk diimpor.</div>
+          <label className="flex items-center gap-2 text-xs text-neutral-600 mb-2">
+            <input type="checkbox" checked={onlyWithStock} onChange={(e) => setOnlyWithStock(e.target.checked)} />
+            Hanya ambil barang yang masih ada sisa stok (menurut saldo terakhir di PDF)
+          </label>
+          <div className="text-xs text-neutral-500 mb-2">
+            {rows.length} barang terbaca dari PDF, {withStockCount} yang masih ada stok, {includedCount} dipilih untuk diimpor.
+          </div>
           <div className="border border-neutral-200 rounded-xl overflow-auto max-h-96">
-            <table className="w-full text-xs min-w-[700px]">
+            <table className="w-full text-xs min-w-[750px]">
               <thead className="sticky top-0 bg-neutral-50">
                 <tr className="text-left font-bold uppercase tracking-wide text-neutral-500 border-b border-neutral-200">
                   <th className="p-2"></th>
                   <th className="p-2">Kode BMN</th>
                   <th className="p-2">Nama Barang</th>
                   <th className="p-2">Satuan</th>
+                  <th className="p-2">Stok (PDF)</th>
                   <th className="p-2">Status</th>
                 </tr>
               </thead>
               <tbody>
-                {rows.map((r, idx) => (
-                  <tr key={r.bmn_code + idx} className="border-b border-neutral-100 last:border-0">
+                {visibleRows.map((r) => (
+                  <tr key={r.bmn_code + r._idx} className="border-b border-neutral-100 last:border-0">
                     <td className="p-2">
-                      <input type="checkbox" checked={r.include} onChange={(e) => updateRow(idx, { include: e.target.checked })} />
+                      <input type="checkbox" checked={r.include} onChange={(e) => updateRow(r._idx, { include: e.target.checked })} />
                     </td>
                     <td className="p-2 text-neutral-400 whitespace-nowrap">{r.bmn_code}</td>
                     <td className="p-2">
                       <input
                         className="border border-neutral-200 rounded px-2 py-1 w-full"
                         value={r.name}
-                        onChange={(e) => updateRow(idx, { name: e.target.value })}
+                        onChange={(e) => updateRow(r._idx, { name: e.target.value })}
                       />
                     </td>
                     <td className="p-2">
                       <input
                         className="border border-neutral-200 rounded px-2 py-1 w-20"
                         value={r.unit}
-                        onChange={(e) => updateRow(idx, { unit: e.target.value })}
+                        onChange={(e) => updateRow(r._idx, { unit: e.target.value })}
                       />
                     </td>
+                    <td className={`p-2 whitespace-nowrap ${hasStock(r) ? "" : "text-neutral-400"}`}>{fmtNum(r.pdf_stock || 0)}</td>
                     <td className="p-2">
                       {r.existing ? (
                         <span className="text-amber-600">Sudah ada: "{r.existing.name}" ({fmtNum(r.existing.current_stock)} {r.existing.unit}) → akan diperbarui</span>
@@ -974,6 +993,9 @@ function ImportItemsPanel({ authHeaders, onImported }) {
                     </td>
                   </tr>
                 ))}
+                {visibleRows.length === 0 && (
+                  <tr><td colSpan="6" className="p-3 text-neutral-400">Tidak ada barang dengan sisa stok.</td></tr>
+                )}
               </tbody>
             </table>
           </div>
@@ -1219,45 +1241,49 @@ function AdminDashboard({ token, onLogout }) {
       )}
 
       {tab === "items" && (
-        <div className="mt-6">
+        <div className="mt-6 space-y-6">
           <ImportItemsPanel authHeaders={authHeaders} onImported={loadAll} />
-          <button onClick={() => setEditingItem({ name: "", barcode: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
-            className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg mb-4">
-            + Barang Baru
-          </button>
-          <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto">
-            <table className="w-full text-sm min-w-[600px]">
-              <thead>
-                <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
-                  <th className="p-3">Nama</th>
-                  <th className="p-3">Barcode</th>
-                  <th className="p-3">Stok</th>
-                  <th className="p-3"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {items.map((it) => (
-                  <tr key={it.id} className="border-b border-neutral-100 last:border-0">
-                    <td className="p-3">
-                      <div className="font-semibold">{it.name}</div>
-                      <div className="text-xs text-neutral-400">{it.category}</div>
-                    </td>
-                    <td className="p-3 text-xs text-neutral-500">{it.barcode}</td>
-                    <td className={`p-3 font-bold ${it.current_stock <= it.min_stock ? "text-red-600" : ""}`}>{fmtNum(it.current_stock)} {it.unit}</td>
-                    <td className="p-3 text-right whitespace-nowrap">
-                      <button onClick={() => setEditingItem(it)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
-                      <button onClick={() => deleteItem(it.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
 
-      {tab === "persediaan" && (
-        <PersediaanTab items={items} itemTx={itemTx} onStockIn={submitStockIn} onDownload={downloadReport} />
+          <Card>
+            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+              <div className="font-bold">Daftar Barang</div>
+              <button onClick={() => setEditingItem({ name: "", barcode: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
+                className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg">
+                + Barang Baru
+              </button>
+            </div>
+            <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto -mx-1">
+              <table className="w-full text-sm min-w-[600px]">
+                <thead>
+                  <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                    <th className="p-3">Nama</th>
+                    <th className="p-3">Barcode</th>
+                    <th className="p-3">Stok</th>
+                    <th className="p-3"></th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {items.map((it) => (
+                    <tr key={it.id} className="border-b border-neutral-100 last:border-0">
+                      <td className="p-3">
+                        <div className="font-semibold">{it.name}</div>
+                        <div className="text-xs text-neutral-400">{it.category}</div>
+                      </td>
+                      <td className="p-3 text-xs text-neutral-500">{it.barcode}</td>
+                      <td className={`p-3 font-bold ${it.current_stock <= it.min_stock ? "text-red-600" : ""}`}>{fmtNum(it.current_stock)} {it.unit}</td>
+                      <td className="p-3 text-right whitespace-nowrap">
+                        <button onClick={() => setEditingItem(it)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
+                        <button onClick={() => deleteItem(it.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </Card>
+
+          <PersediaanTab items={items} itemTx={itemTx} onStockIn={submitStockIn} onDownload={downloadReport} />
+        </div>
       )}
 
       {tab === "rooms" && (
@@ -1557,7 +1583,7 @@ function PersediaanTab({ items, itemTx, onStockIn, onDownload }) {
   };
 
   return (
-    <div className="mt-6 space-y-6">
+    <div className="space-y-6">
       <Card>
         <div className="font-bold mb-4">Catat Barang Masuk</div>
         <form onSubmit={submit} className="space-y-4">
