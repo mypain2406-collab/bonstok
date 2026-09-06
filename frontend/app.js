@@ -817,8 +817,7 @@ const TABS = [
   { key: "bon", label: "Approval Bon" },
   { key: "items", label: "Persediaan" },
   { key: "rooms", label: "Ruangan" },
-  { key: "medicines", label: "Obat Klinik" },
-  { key: "history", label: "Riwayat Obat" },
+  { key: "klinik", label: "Manajemen Klinik" },
 ];
 
 function ImportItemsPanel({ authHeaders, onImported }) {
@@ -883,6 +882,7 @@ function ImportItemsPanel({ authHeaders, onImported }) {
         unit: r.unit,
         action: effectiveInclude(r) ? r.action : "skip",
         item_id: r.existing ? r.existing.id : null,
+        pdf_stock: r.pdf_stock || 0,
       }));
       const resp = await fetch(`${API_BASE}/admin/items/import-commit`, {
         method: "POST",
@@ -1162,6 +1162,20 @@ function AdminDashboard({ token, onLogout }) {
     return r.json();
   };
 
+  const submitMedicineTx = async (payload) => {
+    const r = await fetch(`${API_BASE}/admin/medicines/transaction`, {
+      method: "POST",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || "Gagal mencatat obat masuk/keluar");
+    }
+    loadAll();
+    return r.json();
+  };
+
   if (loading) return <div className="max-w-5xl mx-auto px-4 py-16 text-neutral-500">Memuat...</div>;
 
   return (
@@ -1330,71 +1344,16 @@ function AdminDashboard({ token, onLogout }) {
         </div>
       )}
 
-      {tab === "medicines" && (
-        <div className="mt-6">
-          <button onClick={() => setEditingMedicine({ name: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
-            className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg mb-4">
-            + Obat Baru
-          </button>
-          <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto">
-            <table className="w-full text-sm min-w-[500px]">
-              <thead>
-                <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
-                  <th className="p-3">Nama</th>
-                  <th className="p-3">Stok</th>
-                  <th className="p-3"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {medicines.map((m) => (
-                  <tr key={m.id} className="border-b border-neutral-100 last:border-0">
-                    <td className="p-3">
-                      <div className="font-semibold">{m.name}</div>
-                      <div className="text-xs text-neutral-400">{m.category}</div>
-                    </td>
-                    <td className={`p-3 font-bold ${m.current_stock <= m.min_stock ? "text-red-600" : ""}`}>{fmtNum(m.current_stock)} {m.unit}</td>
-                    <td className="p-3 text-right whitespace-nowrap">
-                      <button onClick={() => setEditingMedicine(m)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
-                      <button onClick={() => deleteMedicine(m.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
-                    </td>
-                  </tr>
-                ))}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {tab === "history" && (
-        <div className="mt-6 bg-white border border-neutral-200 rounded-2xl overflow-x-auto">
-          <table className="w-full text-sm min-w-[600px]">
-            <thead>
-              <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
-                <th className="p-3">Waktu</th>
-                <th className="p-3">Obat</th>
-                <th className="p-3">Tipe</th>
-                <th className="p-3">Jumlah</th>
-                <th className="p-3">Oleh</th>
-              </tr>
-            </thead>
-            <tbody>
-              {history.map((h) => (
-                <tr key={h.id} className="border-b border-neutral-100 last:border-0">
-                  <td className="p-3 text-xs text-neutral-500">{fmtDate(h.created_at)}</td>
-                  <td className="p-3 font-semibold">{h.medicine_name}</td>
-                  <td className="p-3">
-                    <span className={`text-xs font-bold uppercase px-2 py-1 rounded ${h.type === "masuk" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>{h.type}</span>
-                  </td>
-                  <td className="p-3">{fmtNum(h.qty)}</td>
-                  <td className="p-3 text-xs text-neutral-500">{h.nurse_name}</td>
-                </tr>
-              ))}
-              {history.length === 0 && (
-                <tr><td colSpan="5" className="p-3 text-sm text-neutral-400">Belum ada riwayat.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
+      {tab === "klinik" && (
+        <KlinikTab
+          medicines={medicines}
+          medicineTx={history}
+          onMedicineTx={submitMedicineTx}
+          onDownload={downloadReport}
+          onNewMedicine={() => setEditingMedicine({ name: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
+          onEditMedicine={setEditingMedicine}
+          onDeleteMedicine={deleteMedicine}
+        />
       )}
 
       {editingItem && (
@@ -1700,6 +1659,240 @@ function PersediaanTab({ items, itemTx, onStockIn, onDownload }) {
                 </tr>
               ))}
               {itemTx.length === 0 && (
+                <tr><td colSpan="6" className="p-3 text-sm text-neutral-400">Belum ada riwayat.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function KlinikTab({ medicines, medicineTx, onMedicineTx, onDownload, onNewMedicine, onEditMedicine, onDeleteMedicine }) {
+  const [mode, setMode] = useState("existing"); // "existing" | "new"
+  const [type, setType] = useState("masuk"); // "masuk" | "keluar"
+  const [medicineId, setMedicineId] = useState("");
+  const [newName, setNewName] = useState("");
+  const [unit, setUnit] = useState("pcs");
+  const [qty, setQty] = useState(1);
+  const [note, setNote] = useState("");
+  const [photo, setPhoto] = useState(null);
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+
+  const onPhotoChange = (e) => {
+    const file = e.target.files && e.target.files[0];
+    if (!file) { setPhoto(null); return; }
+    const reader = new FileReader();
+    reader.onload = () => setPhoto(reader.result);
+    reader.readAsDataURL(file);
+  };
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (mode === "existing" && !medicineId) {
+      setError("Pilih obat dulu");
+      return;
+    }
+    if (mode === "new" && !newName.trim()) {
+      setError("Isi nama obat baru");
+      return;
+    }
+    if (!qty || Number(qty) <= 0) {
+      setError("Jumlah harus lebih dari 0");
+      return;
+    }
+    setSubmitting(true);
+    try {
+      const payload = {
+        type,
+        qty: Number(qty),
+        unit,
+        photo,
+        note,
+      };
+      if (mode === "existing") payload.medicine_id = medicineId;
+      else payload.name = newName.trim();
+
+      await onMedicineTx(payload);
+      setQty(1);
+      setNote("");
+      setNewName("");
+      setPhoto(null);
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="mt-6 space-y-6">
+      <Card>
+        <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+          <div className="font-bold">Daftar Obat</div>
+          <button onClick={onNewMedicine}
+            className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg">
+            + Obat Baru
+          </button>
+        </div>
+        <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto -mx-1">
+          <table className="w-full text-sm min-w-[500px]">
+            <thead>
+              <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                <th className="p-3">Nama</th>
+                <th className="p-3">Stok</th>
+                <th className="p-3"></th>
+              </tr>
+            </thead>
+            <tbody>
+              {medicines.map((m) => (
+                <tr key={m.id} className="border-b border-neutral-100 last:border-0">
+                  <td className="p-3">
+                    <div className="font-semibold">{m.name}</div>
+                    <div className="text-xs text-neutral-400">{m.category}</div>
+                  </td>
+                  <td className={`p-3 font-bold ${m.current_stock <= m.min_stock ? "text-red-600" : ""}`}>{fmtNum(m.current_stock)} {m.unit}</td>
+                  <td className="p-3 text-right whitespace-nowrap">
+                    <button onClick={() => onEditMedicine(m)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
+                    <button onClick={() => onDeleteMedicine(m.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
+                  </td>
+                </tr>
+              ))}
+              {medicines.length === 0 && (
+                <tr><td colSpan="3" className="p-3 text-sm text-neutral-400">Belum ada obat.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+
+      <Card>
+        <div className="font-bold mb-4">Catat Obat Masuk / Keluar</div>
+        <form onSubmit={submit} className="space-y-4">
+          <div className="flex gap-2">
+            <button type="button" onClick={() => setType("masuk")}
+              className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase border ${type === "masuk" ? "bg-green-600 text-white border-green-600" : "border-neutral-300"}`}>
+              Obat Masuk
+            </button>
+            <button type="button" onClick={() => { setType("keluar"); setMode("existing"); }}
+              className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase border ${type === "keluar" ? "bg-red-600 text-white border-red-600" : "border-neutral-300"}`}>
+              Obat Keluar
+            </button>
+          </div>
+
+          {type === "masuk" && (
+            <div className="flex gap-2">
+              <button type="button" onClick={() => setMode("existing")}
+                className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase border ${mode === "existing" ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300"}`}>
+                Obat Sudah Ada
+              </button>
+              <button type="button" onClick={() => setMode("new")}
+                className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase border ${mode === "new" ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300"}`}>
+                Obat Baru
+              </button>
+            </div>
+          )}
+
+          {mode === "existing" ? (
+            <Field label="Nama Obat">
+              <select className={inputCls} value={medicineId} onChange={(e) => setMedicineId(e.target.value)}>
+                <option value="">-- Pilih obat --</option>
+                {medicines.map((m) => (
+                  <option key={m.id} value={m.id}>{m.name} (stok: {fmtNum(m.current_stock)} {m.unit})</option>
+                ))}
+              </select>
+            </Field>
+          ) : (
+            <Field label="Nama Obat Baru">
+              <input className={inputCls} value={newName} onChange={(e) => setNewName(e.target.value)} placeholder="Contoh: Paracetamol 500mg" />
+            </Field>
+          )}
+
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Jumlah">
+              <input type="number" min="1" className={inputCls} value={qty} onChange={(e) => setQty(e.target.value)} />
+            </Field>
+            <Field label="Satuan">
+              <input className={inputCls} value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="strip, botol, pcs..." />
+            </Field>
+          </div>
+
+          <Field label="Foto Bukti (opsional)">
+            <input type="file" accept="image/*" capture="environment" onChange={onPhotoChange} className="text-sm" />
+            {photo && <img src={photo} alt="preview" className="mt-2 h-24 rounded-lg border border-neutral-200 object-cover" />}
+          </Field>
+
+          <Field label="Catatan (opsional)">
+            <input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Contoh: dipakai pasien X, dari distributor Y..." />
+          </Field>
+
+          {error && <div className="text-red-600 text-sm">{error}</div>}
+
+          <button disabled={submitting} className={`w-full text-white font-bold text-sm uppercase tracking-widest py-2.5 rounded-lg disabled:opacity-50 ${type === "keluar" ? "bg-red-600 hover:bg-red-700" : "bg-neutral-900 hover:bg-neutral-700"}`}>
+            {submitting ? "Menyimpan..." : type === "keluar" ? "Simpan Obat Keluar" : "Simpan Obat Masuk"}
+          </button>
+        </form>
+      </Card>
+
+      <Card>
+        <div className="font-bold mb-4">Unduh Laporan Keluar Masuk Obat</div>
+        <div className="grid grid-cols-2 gap-3">
+          <Field label="Dari Tanggal">
+            <input type="date" className={inputCls} value={start} onChange={(e) => setStart(e.target.value)} />
+          </Field>
+          <Field label="Sampai Tanggal">
+            <input type="date" className={inputCls} value={end} onChange={(e) => setEnd(e.target.value)} />
+          </Field>
+        </div>
+        <div className="flex gap-2 mt-4">
+          <button onClick={() => onDownload("medicines", "pdf", start, end)}
+            className="flex-1 border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase hover:bg-neutral-50">
+            Unduh PDF
+          </button>
+          <button onClick={() => onDownload("medicines", "xlsx", start, end)}
+            className="flex-1 border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase hover:bg-neutral-50">
+            Unduh Excel
+          </button>
+        </div>
+        <p className="text-xs text-neutral-400 mt-3">Laporan berisi total masuk, total keluar dalam periode, dan saldo stok saat ini untuk tiap obat.</p>
+      </Card>
+
+      <Card>
+        <div className="font-bold mb-3">Riwayat Obat Masuk / Keluar</div>
+        <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto -mx-1">
+          <table className="w-full text-sm min-w-[600px]">
+            <thead>
+              <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                <th className="p-3">Waktu</th>
+                <th className="p-3">Obat</th>
+                <th className="p-3">Tipe</th>
+                <th className="p-3">Jumlah</th>
+                <th className="p-3">Catatan / Oleh</th>
+                <th className="p-3">Foto</th>
+              </tr>
+            </thead>
+            <tbody>
+              {medicineTx.map((h) => (
+                <tr key={h.id} className="border-b border-neutral-100 last:border-0">
+                  <td className="p-3 text-xs text-neutral-500 whitespace-nowrap">{fmtDate(h.created_at)}</td>
+                  <td className="p-3 font-semibold">{h.medicine_name}</td>
+                  <td className="p-3">
+                    <span className={`text-xs font-bold uppercase px-2 py-1 rounded ${h.type === "masuk" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>{h.type}</span>
+                  </td>
+                  <td className="p-3">{fmtNum(h.qty)} {h.unit || ""}</td>
+                  <td className="p-3 text-xs text-neutral-500">{h.note || (h.nurse_name ? `Perawat: ${h.nurse_name}` : "-")}</td>
+                  <td className="p-3">
+                    {h.photo ? <img src={h.photo} alt="" className="h-10 w-10 object-cover rounded-lg border border-neutral-200" /> : "-"}
+                  </td>
+                </tr>
+              ))}
+              {medicineTx.length === 0 && (
                 <tr><td colSpan="6" className="p-3 text-sm text-neutral-400">Belum ada riwayat.</td></tr>
               )}
             </tbody>
