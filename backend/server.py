@@ -132,6 +132,7 @@ class ImportCommitRow(BaseModel):
     unit: str
     action: str  # "create" | "update" | "skip"
     item_id: Optional[str] = None  # wajib diisi kalau action == "update"
+    pdf_stock: float = 0  # sisa stok terakhir yang terbaca dari PDF
 
 
 class ImportCommitPayload(BaseModel):
@@ -164,6 +165,16 @@ class MedicineTransactionPayload(BaseModel):
     type: str  # "masuk" | "keluar"
     qty: float
     nurse_name: str
+    note: Optional[str] = None
+
+
+class AdminMedicineTxPayload(BaseModel):
+    medicine_id: Optional[str] = None
+    name: Optional[str] = None  # nama obat baru, kalau medicine_id kosong
+    type: str = "masuk"  # "masuk" | "keluar"
+    unit: str = "pcs"
+    qty: float
+    photo: Optional[str] = None
     note: Optional[str] = None
 
 
@@ -668,7 +679,13 @@ async def admin_items_import_commit(payload: ImportCommitPayload, _: bool = Depe
                 continue
             await db.items.update_one(
                 {"id": row.item_id},
-                {"$set": {"name": name, "unit": unit, "bmn_code": row.bmn_code, "updated_at": now_iso()}},
+                {"$set": {
+                    "name": name,
+                    "unit": unit,
+                    "bmn_code": row.bmn_code,
+                    "current_stock": row.pdf_stock,
+                    "updated_at": now_iso(),
+                }},
             )
             updated += 1
         elif row.action == "create" and name:
@@ -676,7 +693,12 @@ async def admin_items_import_commit(payload: ImportCommitPayload, _: bool = Depe
             if dup_code:
                 await db.items.update_one(
                     {"id": dup_code["id"]},
-                    {"$set": {"name": name, "unit": unit, "updated_at": now_iso()}},
+                    {"$set": {
+                        "name": name,
+                        "unit": unit,
+                        "current_stock": row.pdf_stock,
+                        "updated_at": now_iso(),
+                    }},
                 )
                 updated += 1
                 continue
@@ -690,7 +712,7 @@ async def admin_items_import_commit(payload: ImportCommitPayload, _: bool = Depe
                 "bmn_code": row.bmn_code,
                 "unit": unit,
                 "category": None,
-                "current_stock": 0,
+                "current_stock": row.pdf_stock,
                 "min_stock": 0,
                 "photo": None,
                 "created_at": now_iso(),
@@ -918,6 +940,65 @@ async def admin_list_medicine_transactions(medicine_id: Optional[str] = None, _:
         q["medicine_id"] = medicine_id
     items = await db.medicine_transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return items
+
+
+@api_router.post("/admin/medicines/transaction")
+async def admin_medicine_transaction(payload: AdminMedicineTxPayload, _: bool = Depends(require_admin)):
+    # Pencatatan obat masuk/keluar langsung dari dashboard admin — setara
+    # dengan /admin/items/stock-in untuk barang gudang, tapi mendukung dua
+    # arah (masuk & keluar) karena Manajemen Klinik perlu mencatat obat
+    # yang dipakai/diberikan juga, tidak hanya yang diterima.
+    if payload.type not in ("masuk", "keluar"):
+        raise HTTPException(status_code=400, detail="Tipe transaksi tidak valid")
+    if payload.qty <= 0:
+        raise HTTPException(status_code=400, detail="Jumlah harus lebih dari 0")
+
+    med = None
+    if payload.medicine_id:
+        med = await db.medicines.find_one({"id": payload.medicine_id})
+        if not med:
+            raise HTTPException(status_code=404, detail="Obat tidak ditemukan")
+    elif payload.name and payload.name.strip():
+        med = await db.medicines.find_one({"name": {"$regex": f"^{re.escape(payload.name.strip())}$", "$options": "i"}})
+        if not med:
+            if payload.type == "keluar":
+                raise HTTPException(status_code=404, detail="Obat belum terdaftar, tidak bisa mencatat obat keluar")
+            doc = {
+                "id": new_id(),
+                "name": payload.name.strip(),
+                "unit": payload.unit or "pcs",
+                "category": None,
+                "current_stock": 0,
+                "min_stock": 0,
+                "created_at": now_iso(),
+            }
+            await db.medicines.insert_one(doc)
+            med = doc
+    else:
+        raise HTTPException(status_code=400, detail="Pilih obat yang sudah ada atau isi nama obat baru")
+
+    delta = payload.qty if payload.type == "masuk" else -payload.qty
+    new_stock = med.get("current_stock", 0) + delta
+    if new_stock < 0:
+        raise HTTPException(status_code=400, detail="Stok obat tidak cukup")
+
+    await db.medicines.update_one({"id": med["id"]}, {"$set": {"current_stock": new_stock}})
+
+    tx = {
+        "id": new_id(),
+        "medicine_id": med["id"],
+        "medicine_name": med["name"],
+        "type": payload.type,
+        "qty": payload.qty,
+        "unit": payload.unit or med.get("unit", "pcs"),
+        "photo": payload.photo,
+        "note": payload.note,
+        "nurse_name": "Admin",
+        "created_at": now_iso(),
+    }
+    await db.medicine_transactions.insert_one(tx)
+    tx.pop("_id", None)
+    return tx
 
 
 # ---------------- Admin: stats ----------------
