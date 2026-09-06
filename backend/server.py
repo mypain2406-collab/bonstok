@@ -1134,6 +1134,29 @@ def _med_extract_rows_from_lines(text):
     return results
 
 
+def _med_looks_like_gov_persediaan_excel(content: bytes) -> bool:
+    """Deteksi export "Rincian Buku Persediaan" dari aplikasi BMN/SIMAK.
+    Export Excel dari laporan ini punya keterbatasan aneh: nama barang TIDAK
+    disertakan sebagai data sel sama sekali (hanya kode BMN-nya), beda
+    dengan export PDF-nya yang menyertakan nama barang secara utuh. Dipakai
+    supaya kalau ini yang terjadi, admin dapat pesan error yang jelas
+    (bukan sekadar "tidak ada data terbaca") dan diarahkan ke solusinya."""
+    try:
+        from openpyxl import load_workbook
+        wb = load_workbook(io.BytesIO(content), data_only=True)
+        markers = ("RINCIAN BUKU PERSEDIAAN", "KODE UAKPB")
+        for ws in wb.worksheets:
+            for i, row in enumerate(ws.iter_rows(values_only=True)):
+                if i > 30:
+                    break
+                for cell in row:
+                    if isinstance(cell, str) and any(m in cell.upper() for m in markers):
+                        return True
+    except Exception:
+        pass
+    return False
+
+
 def _parse_medicine_excel(content: bytes):
     from openpyxl import load_workbook
     wb = load_workbook(io.BytesIO(content), data_only=True)
@@ -1160,6 +1183,26 @@ def _parse_medicine_docx(content: bytes):
 
 
 def _parse_medicine_pdf(content: bytes):
+    # Coba dulu format laporan "Rincian Buku Persediaan" (satu barang per
+    # halaman: KODE BARANG / NAMA BARANG / SATUAN / saldo akhir) — ini
+    # format yang sama dipakai menu Persediaan dan sudah divalidasi 100%
+    # akurat lewat _parse_persediaan_pdf. Kalau PDF yang diupload ke Klinik
+    # kebetulan format ini juga (laporan BMN sering mencakup obat/alkes),
+    # pakai parser presisi itu dulu, bukan tebak-tebakan heuristik, supaya
+    # nama & stoknya benar-benar akurat.
+    try:
+        specific_rows = _parse_persediaan_pdf(content)
+    except Exception:
+        specific_rows = []
+    if specific_rows:
+        return [
+            {"name": r["name"], "stock": r.get("pdf_stock", 0), "unit": r.get("unit")}
+            for r in specific_rows
+        ]
+
+    # Bukan format itu -> pembacaan bebas: cari tabel bergrid via PyMuPDF
+    # find_tables(), atau fallback pola teks "<nama> ... <angka> [satuan]"
+    # per baris kalau PDF-nya tidak punya tabel bergrid sama sekali.
     import fitz
     doc = fitz.open(stream=content, filetype="pdf")
     all_rows = []
@@ -1207,16 +1250,32 @@ async def admin_medicines_import_preview(file: UploadFile = File(...), _: bool =
         raise HTTPException(status_code=400, detail=f"Gagal membaca file: {e}")
 
     if not rows:
+        is_excel = filename.endswith(".xlsx") or filename.endswith(".xlsm") or filename.endswith(".xls")
+        if is_excel and _med_looks_like_gov_persediaan_excel(content):
+            raise HTTPException(
+                status_code=400,
+                detail='File Excel ini terdeteksi sebagai export "Rincian Buku Persediaan" dari sistem BMN, tapi export Excel dari laporan ini tidak menyertakan nama barang sebagai data (hanya kode BMN) — ini keterbatasan sistem sumbernya, bukan file yang rusak. Silakan upload versi PDF dari laporan yang sama (PDF-nya menyertakan nama barang secara lengkap), atau gunakan file Excel/Word dengan kolom nama & stok yang jelas.',
+            )
         raise HTTPException(
             status_code=400,
             detail="Tidak ada data nama obat & stok yang terbaca dari file ini. Pastikan file berisi daftar/tabel dengan nama obat dan jumlah stok yang jelas.",
         )
 
+    # Gabungkan baris dengan nama sama (misal obat yang sama muncul di
+    # beberapa baris/halaman/batch berbeda) dengan MENJUMLAHKAN stoknya,
+    # bukan menimpa begitu saja — supaya tidak diam-diam kehilangan stok
+    # dari batch lain yang punya nama sama.
     dedup = {}
     for r in rows:
         key = r["name"].strip().lower()
-        if key:
-            dedup[key] = r
+        if not key:
+            continue
+        if key in dedup:
+            dedup[key]["stock"] += r.get("stock", 0)
+            if not dedup[key].get("unit") and r.get("unit"):
+                dedup[key]["unit"] = r["unit"]
+        else:
+            dedup[key] = dict(r)
     rows = list(dedup.values())
 
     existing_by_name = {}
