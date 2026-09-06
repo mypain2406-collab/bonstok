@@ -1346,6 +1346,8 @@ function AdminDashboard({ token, onLogout }) {
 
       {tab === "klinik" && (
         <KlinikTab
+          authHeaders={authHeaders}
+          onImported={loadAll}
           medicines={medicines}
           medicineTx={history}
           onMedicineTx={submitMedicineTx}
@@ -1669,7 +1671,187 @@ function PersediaanTab({ items, itemTx, onStockIn, onDownload }) {
   );
 }
 
-function KlinikTab({ medicines, medicineTx, onMedicineTx, onDownload, onNewMedicine, onEditMedicine, onDeleteMedicine }) {
+function ImportMedicinesPanel({ authHeaders, onImported }) {
+  const [file, setFile] = useState(null);
+  const [rows, setRows] = useState(null);
+  const [loadingPreview, setLoadingPreview] = useState(false);
+  const [committing, setCommitting] = useState(false);
+  const [result, setResult] = useState(null);
+  const [error, setError] = useState("");
+
+  const doPreview = async () => {
+    if (!file) return;
+    setLoadingPreview(true);
+    setError("");
+    setResult(null);
+    try {
+      const fd = new FormData();
+      fd.append("file", file);
+      const r = await fetch(`${API_BASE}/admin/medicines/import-preview`, {
+        method: "POST",
+        headers: authHeaders,
+        body: fd,
+      });
+      const data = await r.json().catch(() => ({}));
+      if (!r.ok) {
+        setError(data.detail || "Gagal membaca file");
+        setRows(null);
+        return;
+      }
+      setRows(data.rows.map((row) => ({
+        ...row,
+        include: true,
+        action: row.existing ? "update" : "create",
+      })));
+    } catch (err) {
+      setError("Gagal membaca file");
+    } finally {
+      setLoadingPreview(false);
+    }
+  };
+
+  const updateRow = (idx, patch) => {
+    setRows((prev) => prev.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+  };
+
+  const doCommit = async () => {
+    if (!rows) return;
+    setCommitting(true);
+    setError("");
+    try {
+      const payloadRows = rows.map((r) => ({
+        name: r.name,
+        unit: r.unit,
+        stock: Number(r.stock) || 0,
+        action: r.include ? r.action : "skip",
+        medicine_id: r.existing ? r.existing.id : null,
+      }));
+      const resp = await fetch(`${API_BASE}/admin/medicines/import-commit`, {
+        method: "POST",
+        headers: { ...authHeaders, "Content-Type": "application/json" },
+        body: JSON.stringify({ rows: payloadRows }),
+      });
+      const data = await resp.json().catch(() => ({}));
+      if (!resp.ok) {
+        setError(data.detail || "Gagal mengimpor obat");
+        return;
+      }
+      setResult(data);
+      setRows(null);
+      setFile(null);
+      onImported();
+    } catch (err) {
+      setError("Gagal mengimpor obat");
+    } finally {
+      setCommitting(false);
+    }
+  };
+
+  const includedCount = rows ? rows.filter((r) => r.include).length : 0;
+
+  return (
+    <div className="bg-white border border-neutral-200 rounded-2xl p-4">
+      <div className="font-bold text-sm mb-2">Import Nama & Stok Obat dari File</div>
+      <p className="text-xs text-neutral-500 mb-3">
+        Upload file Excel (.xlsx), Word (.docx), atau PDF dengan format bebas — asal ada daftar/tabel nama obat dan jumlah stok. Sistem akan menebak kolom nama, satuan, dan stok secara otomatis, lalu Anda bisa meninjau sebelum disimpan.
+      </p>
+      <div className="flex flex-wrap gap-2 items-center">
+        <input
+          type="file"
+          accept=".xlsx,.xlsm,.xls,.docx,.pdf"
+          onChange={(e) => { setFile(e.target.files[0] || null); setRows(null); setResult(null); setError(""); }}
+          className="text-xs"
+        />
+        <button
+          onClick={doPreview}
+          disabled={!file || loadingPreview}
+          className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg disabled:opacity-40"
+        >
+          {loadingPreview ? "Membaca..." : "Baca & Tinjau"}
+        </button>
+      </div>
+
+      {error && <div className="text-xs text-red-600 mt-3">{error}</div>}
+
+      {result && (
+        <div className="text-xs text-green-700 mt-3 font-semibold">
+          Selesai: {result.created} obat baru dibuat, {result.updated} diperbarui, {result.skipped} dilewati.
+        </div>
+      )}
+
+      {rows && (
+        <div className="mt-4">
+          <div className="text-xs text-neutral-500 mb-2">
+            {rows.length} obat terbaca dari file, {includedCount} dipilih untuk diimpor.
+          </div>
+          <div className="border border-neutral-200 rounded-xl overflow-auto max-h-96">
+            <table className="w-full text-xs min-w-[650px]">
+              <thead className="sticky top-0 bg-neutral-50">
+                <tr className="text-left font-bold uppercase tracking-wide text-neutral-500 border-b border-neutral-200">
+                  <th className="p-2"></th>
+                  <th className="p-2">Nama Obat</th>
+                  <th className="p-2">Satuan</th>
+                  <th className="p-2">Stok</th>
+                  <th className="p-2">Status</th>
+                </tr>
+              </thead>
+              <tbody>
+                {rows.map((r, idx) => (
+                  <tr key={r.name + idx} className="border-b border-neutral-100 last:border-0">
+                    <td className="p-2">
+                      <input type="checkbox" checked={r.include} onChange={(e) => updateRow(idx, { include: e.target.checked })} />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        className="border border-neutral-200 rounded px-2 py-1 w-full"
+                        value={r.name}
+                        onChange={(e) => updateRow(idx, { name: e.target.value })}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        className="border border-neutral-200 rounded px-2 py-1 w-20"
+                        value={r.unit}
+                        onChange={(e) => updateRow(idx, { unit: e.target.value })}
+                      />
+                    </td>
+                    <td className="p-2">
+                      <input
+                        type="number"
+                        className="border border-neutral-200 rounded px-2 py-1 w-24"
+                        value={r.stock}
+                        onChange={(e) => updateRow(idx, { stock: e.target.value })}
+                      />
+                    </td>
+                    <td className="p-2">
+                      {r.existing ? (
+                        <span className="text-amber-600">Sudah ada: "{r.existing.name}" ({fmtNum(r.existing.current_stock)} {r.existing.unit}) → akan diperbarui</span>
+                      ) : (
+                        <span className="text-green-600">Obat baru</span>
+                      )}
+                    </td>
+                  </tr>
+                ))}
+                {rows.length === 0 && (
+                  <tr><td colSpan="5" className="p-3 text-neutral-400">Tidak ada data terbaca.</td></tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <button
+            onClick={doCommit}
+            disabled={committing || includedCount === 0}
+            className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg mt-3 disabled:opacity-40"
+          >
+            {committing ? "Menyimpan..." : `Import ${includedCount} Obat Terpilih`}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
+function KlinikTab({ authHeaders, onImported, medicines, medicineTx, onMedicineTx, onDownload, onNewMedicine, onEditMedicine, onDeleteMedicine }) {
   const [mode, setMode] = useState("existing"); // "existing" | "new"
   const [type, setType] = useState("masuk"); // "masuk" | "keluar"
   const [medicineId, setMedicineId] = useState("");
@@ -1733,6 +1915,8 @@ function KlinikTab({ medicines, medicineTx, onMedicineTx, onDownload, onNewMedic
 
   return (
     <div className="mt-6 space-y-6">
+      <ImportMedicinesPanel authHeaders={authHeaders} onImported={onImported} />
+
       <Card>
         <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
           <div className="font-bold">Daftar Obat</div>
