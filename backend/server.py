@@ -1001,6 +1001,301 @@ async def admin_medicine_transaction(payload: AdminMedicineTxPayload, _: bool = 
     return tx
 
 
+# ---------------- Admin: bulk import obat (Excel / Word / PDF, format bebas) ----------------
+# Beda dengan import barang persediaan (yang mengharuskan format PDF resmi
+# tertentu), import obat klinik ini dibuat "format bebas": admin bisa upload
+# Excel, Word, atau PDF apa saja asalkan isinya ada semacam daftar/tabel
+# nama obat + jumlah stok. Parser di bawah ini heuristik: cari baris header
+# yang mengandung kata kunci ("nama"/"obat" untuk nama, "stok"/"jumlah" dst
+# untuk stok), lalu pakai kolom itu untuk semua baris di bawahnya. Kalau
+# tidak ketemu baris header yang cocok, fallback: kolom pertama dianggap
+# nama, dan angka pertama yang ketemu di kolom-kolom berikutnya dianggap
+# stok. Sama seperti import barang, alurnya dua langkah: preview lalu commit.
+
+_MED_NAME_KEYWORDS = ["nama obat", "nama barang", "nama", "obat", "item", "medicine", "name"]
+_MED_STOCK_KEYWORDS = ["stok", "stock", "jumlah", "qty", "quantity", "saldo", "sisa"]
+_MED_UNIT_KEYWORDS = ["satuan", "unit", "uom"]
+
+
+def _med_parse_num(s):
+    """Parse angka dari teks bebas (bisa ada 'Rp', '.', ',', spasi, dll).
+    Mengembalikan None kalau tidak ada angka yang valid sama sekali."""
+    if s is None:
+        return None
+    s = str(s).strip()
+    if not s:
+        return None
+    cleaned = re.sub(r"[^0-9,.\-]", "", s)
+    if not cleaned or cleaned in ("-", ".", ","):
+        return None
+    if "," in cleaned and "." in cleaned:
+        if cleaned.rfind(",") > cleaned.rfind("."):
+            cleaned = cleaned.replace(".", "").replace(",", ".")
+        else:
+            cleaned = cleaned.replace(",", "")
+    elif "," in cleaned:
+        parts = cleaned.split(",")
+        if len(parts) > 1 and len(parts[-1]) == 3:
+            cleaned = cleaned.replace(",", "")
+        else:
+            cleaned = cleaned.replace(",", ".")
+    try:
+        return float(cleaned)
+    except Exception:
+        return None
+
+
+def _med_find_header_columns(row):
+    """Cek apakah satu baris tabel terlihat seperti baris header (ada kata
+    kunci nama & stok). Kalau ya, kembalikan index kolomnya."""
+    name_idx = stock_idx = unit_idx = None
+    for i, cell in enumerate(row):
+        c = (cell or "").strip().lower()
+        if not c:
+            continue
+        if name_idx is None and any(k in c for k in _MED_NAME_KEYWORDS):
+            name_idx = i
+        if stock_idx is None and any(k in c for k in _MED_STOCK_KEYWORDS):
+            stock_idx = i
+        if unit_idx is None and any(k in c for k in _MED_UNIT_KEYWORDS):
+            unit_idx = i
+    if name_idx is not None and stock_idx is not None and name_idx != stock_idx:
+        return name_idx, stock_idx, unit_idx
+    return None
+
+
+def _med_extract_rows_from_table(table_rows):
+    """table_rows: list of list of str. Kembalikan list {"name","stock","unit"}."""
+    if not table_rows:
+        return []
+    header = None
+    header_idx = -1
+    for i, row in enumerate(table_rows[:3]):
+        info = _med_find_header_columns(row)
+        if info:
+            header = info
+            header_idx = i
+            break
+
+    results = []
+    if header:
+        name_idx, stock_idx, unit_idx = header
+        for row in table_rows[header_idx + 1:]:
+            if name_idx >= len(row):
+                continue
+            name = (row[name_idx] or "").strip()
+            if not name:
+                continue
+            stock = _med_parse_num(row[stock_idx]) if stock_idx < len(row) else None
+            if stock is None:
+                continue
+            unit = None
+            if unit_idx is not None and unit_idx < len(row):
+                unit = (row[unit_idx] or "").strip() or None
+            results.append({"name": name, "stock": stock, "unit": unit})
+    else:
+        for row in table_rows:
+            if not row:
+                continue
+            name = (row[0] or "").strip()
+            if not name:
+                continue
+            stock = None
+            for cell in row[1:]:
+                n = _med_parse_num(cell)
+                if n is not None:
+                    stock = n
+                    break
+            if stock is None:
+                continue
+            results.append({"name": name, "stock": stock, "unit": None})
+    return results
+
+
+_MED_LINE_RE = re.compile(r"^(.*\S)\s+([\d.,]+)\s*([A-Za-z]*)\s*$")
+
+
+def _med_extract_rows_from_lines(text):
+    """Fallback untuk teks bebas tanpa tabel: cari baris berpola
+    '<nama obat> ... <angka> [satuan]'."""
+    results = []
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line or len(line) < 3:
+            continue
+        m = _MED_LINE_RE.match(line)
+        if not m:
+            continue
+        name = m.group(1).strip(" -.:\t")
+        stock = _med_parse_num(m.group(2))
+        unit = m.group(3).strip() or None
+        if name and len(name) > 1 and stock is not None:
+            results.append({"name": name, "stock": stock, "unit": unit})
+    return results
+
+
+def _parse_medicine_excel(content: bytes):
+    from openpyxl import load_workbook
+    wb = load_workbook(io.BytesIO(content), data_only=True)
+    all_rows = []
+    for ws in wb.worksheets:
+        table_rows = []
+        for row in ws.iter_rows(values_only=True):
+            table_rows.append(["" if c is None else str(c) for c in row])
+        all_rows.extend(_med_extract_rows_from_table(table_rows))
+    return all_rows
+
+
+def _parse_medicine_docx(content: bytes):
+    from docx import Document
+    doc = Document(io.BytesIO(content))
+    all_rows = []
+    for table in doc.tables:
+        table_rows = [[cell.text.strip() for cell in row.cells] for row in table.rows]
+        all_rows.extend(_med_extract_rows_from_table(table_rows))
+    if not all_rows:
+        full_text = "\n".join(p.text for p in doc.paragraphs)
+        all_rows.extend(_med_extract_rows_from_lines(full_text))
+    return all_rows
+
+
+def _parse_medicine_pdf(content: bytes):
+    import fitz
+    doc = fitz.open(stream=content, filetype="pdf")
+    all_rows = []
+    for page in doc:
+        found_any = False
+        try:
+            found_tables = page.find_tables()
+        except Exception:
+            found_tables = None
+        if found_tables and found_tables.tables:
+            for t in found_tables.tables:
+                try:
+                    raw_rows = t.extract()
+                except Exception:
+                    continue
+                table_rows = [["" if c is None else str(c) for c in row] for row in raw_rows]
+                rows = _med_extract_rows_from_table(table_rows)
+                if rows:
+                    found_any = True
+                    all_rows.extend(rows)
+        if not found_any:
+            all_rows.extend(_med_extract_rows_from_lines(page.get_text()))
+    return all_rows
+
+
+@api_router.post("/admin/medicines/import-preview")
+async def admin_medicines_import_preview(file: UploadFile = File(...), _: bool = Depends(require_admin)):
+    filename = (file.filename or "").lower()
+    content = await file.read()
+    try:
+        if filename.endswith(".xlsx") or filename.endswith(".xlsm") or filename.endswith(".xls"):
+            rows = _parse_medicine_excel(content)
+        elif filename.endswith(".docx"):
+            rows = _parse_medicine_docx(content)
+        elif filename.endswith(".pdf"):
+            rows = _parse_medicine_pdf(content)
+        else:
+            raise HTTPException(
+                status_code=400,
+                detail="Format file tidak didukung. Gunakan file Excel (.xlsx), Word (.docx), atau PDF (.pdf).",
+            )
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Gagal membaca file: {e}")
+
+    if not rows:
+        raise HTTPException(
+            status_code=400,
+            detail="Tidak ada data nama obat & stok yang terbaca dari file ini. Pastikan file berisi daftar/tabel dengan nama obat dan jumlah stok yang jelas.",
+        )
+
+    dedup = {}
+    for r in rows:
+        key = r["name"].strip().lower()
+        if key:
+            dedup[key] = r
+    rows = list(dedup.values())
+
+    existing_by_name = {}
+    async for m in db.medicines.find({}, {"_id": 0}):
+        existing_by_name[m["name"].strip().lower()] = m
+
+    result = []
+    for r in rows:
+        match = existing_by_name.get(r["name"].strip().lower())
+        unit = r.get("unit") or (match.get("unit") if match else None) or "pcs"
+        result.append({
+            "name": r["name"],
+            "stock": r["stock"],
+            "unit": unit,
+            "existing": ({
+                "id": match["id"],
+                "name": match["name"],
+                "unit": match.get("unit"),
+                "current_stock": match.get("current_stock", 0),
+            } if match else None),
+        })
+    return {"total": len(result), "rows": result}
+
+
+class MedicineImportCommitRow(BaseModel):
+    name: str
+    unit: str
+    stock: float = 0
+    action: str  # "create" | "update" | "skip"
+    medicine_id: Optional[str] = None  # wajib diisi kalau action == "update"
+
+
+class MedicineImportCommitPayload(BaseModel):
+    rows: List[MedicineImportCommitRow]
+
+
+@api_router.post("/admin/medicines/import-commit")
+async def admin_medicines_import_commit(payload: MedicineImportCommitPayload, _: bool = Depends(require_admin)):
+    created, updated, skipped = 0, 0, 0
+    for row in payload.rows:
+        name = (row.name or "").strip()
+        unit = (row.unit or "").strip() or "pcs"
+
+        if row.action == "update" and row.medicine_id and name:
+            existing = await db.medicines.find_one({"id": row.medicine_id})
+            if not existing:
+                skipped += 1
+                continue
+            await db.medicines.update_one(
+                {"id": row.medicine_id},
+                {"$set": {"name": name, "unit": unit, "current_stock": row.stock, "updated_at": now_iso()}},
+            )
+            updated += 1
+        elif row.action == "create" and name:
+            dup = await db.medicines.find_one({"name": {"$regex": f"^{re.escape(name)}$", "$options": "i"}})
+            if dup:
+                await db.medicines.update_one(
+                    {"id": dup["id"]},
+                    {"$set": {"unit": unit, "current_stock": row.stock, "updated_at": now_iso()}},
+                )
+                updated += 1
+                continue
+            doc = {
+                "id": new_id(),
+                "name": name,
+                "unit": unit,
+                "category": None,
+                "current_stock": row.stock,
+                "min_stock": 0,
+                "created_at": now_iso(),
+            }
+            await db.medicines.insert_one(doc)
+            created += 1
+        else:
+            skipped += 1
+
+    return {"created": created, "updated": updated, "skipped": skipped}
+
+
 # ---------------- Admin: stats ----------------
 
 @api_router.get("/admin/stats")
