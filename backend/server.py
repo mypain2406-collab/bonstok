@@ -191,6 +191,16 @@ class StockInPayload(BaseModel):
     note: Optional[str] = None
 
 
+class AdminItemTxPayload(BaseModel):
+    item_id: Optional[str] = None
+    name: Optional[str] = None  # nama barang baru, kalau item_id kosong (hanya untuk type masuk)
+    type: str = "masuk"  # "masuk" | "keluar"
+    unit: str = "pcs"
+    qty: float
+    photo: Optional[str] = None
+    note: Optional[str] = None
+
+
 # ---------------- Public: items (gudang) ----------------
 
 @api_router.get("/health")
@@ -784,6 +794,70 @@ async def admin_list_item_transactions(item_id: Optional[str] = None, _: bool = 
         q["item_id"] = item_id
     items = await db.item_transactions.find(q, {"_id": 0}).sort("created_at", -1).to_list(1000)
     return items
+
+
+@api_router.post("/admin/items/transaction")
+async def admin_item_transaction(payload: AdminItemTxPayload, _: bool = Depends(require_admin)):
+    # Pencatatan barang keluar dari persediaan secara manual (Mutasi Keluar),
+    # setara dengan /admin/medicines/transaction untuk obat klinik. Barang
+    # keluar via approval Bon sudah otomatis tercatat; endpoint ini untuk
+    # kasus admin perlu mencatat barang keluar/masuk secara manual di luar
+    # alur Bon (misalnya koreksi stok, barang dipakai langsung oleh admin).
+    if payload.type not in ("masuk", "keluar"):
+        raise HTTPException(status_code=400, detail="Tipe transaksi tidak valid")
+    if payload.qty <= 0:
+        raise HTTPException(status_code=400, detail="Jumlah harus lebih dari 0")
+
+    item = None
+    if payload.item_id:
+        item = await db.items.find_one({"id": payload.item_id})
+        if not item:
+            raise HTTPException(status_code=404, detail="Barang tidak ditemukan")
+    elif payload.name and payload.name.strip():
+        item = await db.items.find_one({"name": {"$regex": f"^{re.escape(payload.name.strip())}$", "$options": "i"}})
+        if not item:
+            if payload.type == "keluar":
+                raise HTTPException(status_code=404, detail="Barang belum terdaftar, tidak bisa mencatat mutasi keluar")
+            barcode = f"AUTO-{new_id()[:8].upper()}"
+            while await db.items.find_one({"barcode": barcode}):
+                barcode = f"AUTO-{new_id()[:8].upper()}"
+            doc = {
+                "id": new_id(),
+                "name": payload.name.strip(),
+                "barcode": barcode,
+                "unit": payload.unit or "pcs",
+                "category": None,
+                "current_stock": 0,
+                "min_stock": 0,
+                "photo": payload.photo,
+                "created_at": now_iso(),
+            }
+            await db.items.insert_one(doc)
+            item = doc
+    else:
+        raise HTTPException(status_code=400, detail="Pilih barang yang sudah ada atau isi nama barang baru")
+
+    delta = payload.qty if payload.type == "masuk" else -payload.qty
+    new_stock = item.get("current_stock", 0) + delta
+    if new_stock < 0:
+        raise HTTPException(status_code=400, detail="Stok barang tidak cukup")
+
+    await db.items.update_one({"id": item["id"]}, {"$set": {"current_stock": new_stock}})
+
+    tx = {
+        "id": new_id(),
+        "item_id": item["id"],
+        "item_name": item["name"],
+        "type": payload.type,
+        "qty": payload.qty,
+        "unit": payload.unit or item.get("unit", "pcs"),
+        "photo": payload.photo,
+        "note": payload.note,
+        "created_at": now_iso(),
+    }
+    await db.item_transactions.insert_one(tx)
+    tx.pop("_id", None)
+    return tx
 
 
 # ---------------- Admin: rooms ----------------
