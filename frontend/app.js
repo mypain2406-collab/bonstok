@@ -225,7 +225,11 @@ function GudangPage() {
   const [roomQuery, setRoomQuery] = useState("");
   const [roomOptions, setRoomOptions] = useState([]);
   const [loadingRooms, setLoadingRooms] = useState(false);
-  const [cart, setCart] = useState([]); // [{item_id, name, unit, qty, current_stock, photo}]
+  const [cart, setCart] = useState([]); // [{item_id, name, unit, qty, current_stock, photo, freeform}]
+  const [jenis, setJenis] = useState("persediaan"); // "persediaan" | "nota_dinas"
+  const [freeName, setFreeName] = useState("");
+  const [freeUnit, setFreeUnit] = useState("pcs");
+  const [freeQty, setFreeQty] = useState(1);
   const [itemQuery, setItemQuery] = useState("");
   const [searchResults, setSearchResults] = useState([]);
   const [searching, setSearching] = useState(false);
@@ -309,8 +313,23 @@ function GudangPage() {
       if (existing) {
         return prev.map((c) => (c.item_id === item.id ? { ...c, qty: c.qty + 1 } : c));
       }
-      return [...prev, { item_id: item.id, name: item.name, unit: item.unit, qty: 1, current_stock: item.current_stock, photo: item.photo || null }];
+      return [...prev, { _cid: `it_${item.id}`, item_id: item.id, name: item.name, unit: item.unit, qty: 1, current_stock: item.current_stock, photo: item.photo || null, freeform: false }];
     });
+  };
+
+  const addFreeformToCart = () => {
+    const name = freeName.trim();
+    if (!name) return;
+    setCart((prev) => [...prev, { _cid: `free_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`, item_id: null, name, unit: freeUnit.trim() || "pcs", qty: Math.max(1, Number(freeQty) || 1), current_stock: null, photo: null, freeform: true }]);
+    setFreeName("");
+    setFreeUnit("pcs");
+    setFreeQty(1);
+  };
+
+  const switchJenis = (j) => {
+    if (j === jenis) return;
+    setJenis(j);
+    setCart([]);
   };
 
   const doSearch = async (q) => {
@@ -340,12 +359,12 @@ function GudangPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [room]);
 
-  const updateQty = (item_id, qty) => {
-    setCart((prev) => prev.map((c) => (c.item_id === item_id ? { ...c, qty: Math.max(1, qty) } : c)));
+  const updateQty = (cid, qty) => {
+    setCart((prev) => prev.map((c) => (c._cid === cid ? { ...c, qty: Math.max(1, qty) } : c)));
   };
 
-  const removeFromCart = (item_id) => {
-    setCart((prev) => prev.filter((c) => c.item_id !== item_id));
+  const removeFromCart = (cid) => {
+    setCart((prev) => prev.filter((c) => c._cid !== cid));
   };
 
   const submitBon = async () => {
@@ -366,7 +385,12 @@ function GudangPage() {
           requester_name: requesterName,
           room_id: room.id,
           room: room.name,
-          items: cart.map((c) => ({ item_id: c.item_id, qty: c.qty })),
+          jenis,
+          items: cart.map((c) => (
+            jenis === "nota_dinas"
+              ? { item_name: c.name, unit: c.unit, qty: c.qty }
+              : { item_id: c.item_id, qty: c.qty }
+          )),
         }),
       });
       if (!r.ok) {
@@ -389,6 +413,10 @@ function GudangPage() {
     setRoom(null);
     setCart([]);
     setSearchResults([]);
+    setJenis("persediaan");
+    setFreeName("");
+    setFreeUnit("pcs");
+    setFreeQty(1);
   };
 
   const tanggalStr = now.toLocaleDateString("id-ID", { weekday: "long", day: "numeric", month: "long", year: "numeric" });
@@ -442,6 +470,24 @@ function GudangPage() {
                 <input className={inputCls} value={requesterName} onChange={(e) => setRequesterName(e.target.value)} placeholder="Nama Anda" />
               </Field>
 
+              <Field label="Jenis Permintaan">
+                <div className="flex gap-2">
+                  <button type="button" onClick={() => switchJenis("persediaan")}
+                    className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase border ${jenis === "persediaan" ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300"}`}>
+                    Permintaan Barang (Persediaan)
+                  </button>
+                  <button type="button" onClick={() => switchJenis("nota_dinas")}
+                    className={`flex-1 py-2 rounded-lg text-xs font-bold uppercase border ${jenis === "nota_dinas" ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300"}`}>
+                    Nota Dinas Kebutuhan Lainnya
+                  </button>
+                </div>
+                <p className="text-xs text-neutral-400 mt-2">
+                  {jenis === "persediaan"
+                    ? "Ambil barang yang tersedia di stok persediaan gudang."
+                    : "Ajukan kebutuhan barang lain yang tidak tersedia di stok persediaan (dicatat sebagai permintaan, tidak memotong stok)."}
+                </p>
+              </Field>
+
               <Field label="Ruangan / Unit Kerja">
                 {room ? (
                   <div className="flex items-center justify-between bg-neutral-100 rounded-lg px-3 py-2">
@@ -485,7 +531,7 @@ value=""
           </div>
           </Card>
 
-{room && (
+{room && jenis === "persediaan" && (
   <Card>
   <Field label="Cari nama barang persediaan">
   <input
@@ -519,6 +565,29 @@ value=""
   </select>
   </Card>
                               )}
+
+              {room && jenis === "nota_dinas" && (
+                <Card>
+                  <div className="font-bold mb-3">Tambah Kebutuhan Barang</div>
+                  <div className="space-y-3">
+                    <Field label="Nama Barang">
+                      <input className={inputCls} value={freeName} onChange={(e) => setFreeName(e.target.value)} placeholder="Contoh: Kertas A4, Toner Printer..." />
+                    </Field>
+                    <div className="grid grid-cols-2 gap-3">
+                      <Field label="Jumlah">
+                        <input type="number" min="1" className={inputCls} value={freeQty} onChange={(e) => setFreeQty(e.target.value)} />
+                      </Field>
+                      <Field label="Satuan">
+                        <input className={inputCls} value={freeUnit} onChange={(e) => setFreeUnit(e.target.value)} placeholder="pcs, rim, box..." />
+                      </Field>
+                    </div>
+                    <button type="button" onClick={addFreeformToCart}
+                      className="w-full border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase tracking-wider hover:bg-neutral-50">
+                      + Tambah ke Daftar
+                    </button>
+                  </div>
+                </Card>
+              )}
         </div>
 
         <Card>
@@ -526,7 +595,7 @@ value=""
           {cart.length === 0 && <div className="text-sm text-neutral-400">Belum ada barang. Cari nama barang untuk menambahkan.</div>}
           <div className="space-y-3">
             {cart.map((c) => (
-              <div key={c.item_id} className="flex items-center gap-3 border-b border-neutral-100 pb-3 last:border-0">
+              <div key={c._cid} className="flex items-center gap-3 border-b border-neutral-100 pb-3 last:border-0">
           {c.photo ? (
             <img src={c.photo} alt={c.name} className="w-9 h-9 rounded-lg object-cover border border-neutral-200 flex-shrink-0" />
             ) : (
@@ -534,16 +603,16 @@ value=""
               )}
                 <div className="flex-1">
                   <div className="text-sm font-semibold">{c.name}</div>
-                  <div className="text-xs text-neutral-400">Stok tersedia: {fmtNum(c.current_stock)} {c.unit}</div>
+                  <div className="text-xs text-neutral-400">{c.freeform ? "Kebutuhan di luar stok" : `Stok tersedia: ${fmtNum(c.current_stock)} ${c.unit}`}</div>
                 </div>
                 <input
                   type="number"
                   min="1"
                   value={c.qty}
-                  onChange={(e) => updateQty(c.item_id, Number(e.target.value))}
+                  onChange={(e) => updateQty(c._cid, Number(e.target.value))}
                   className="w-16 rounded-lg border border-neutral-300 px-2 py-1 text-sm text-center"
                 />
-                <button onClick={() => removeFromCart(c.item_id)} className="text-red-600 text-xs font-bold uppercase">Hapus</button>
+                <button onClick={() => removeFromCart(c._cid)} className="text-red-600 text-xs font-bold uppercase">Hapus</button>
               </div>
             ))}
           </div>
@@ -764,6 +833,7 @@ function useAdminToken() {
 }
 
 function AdminLogin({ onLogin }) {
+  const [username, setUsername] = useState("");
   const [password, setPassword] = useState("");
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState("");
@@ -776,9 +846,9 @@ function AdminLogin({ onLogin }) {
       const r = await fetch(`${API_BASE}/admin/login`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ password }),
+        body: JSON.stringify({ username, password }),
       });
-      if (!r.ok) throw new Error("Password salah");
+      if (!r.ok) throw new Error("Username atau password salah");
       const data = await r.json();
       onLogin(data.token);
     } catch (err) {
@@ -789,25 +859,37 @@ function AdminLogin({ onLogin }) {
   };
 
   return (
-    <div className="max-w-sm mx-auto px-4 py-24">
-      <h1 className="text-2xl font-black">Admin Bon Persediaan</h1>
-      <form onSubmit={submit} className="mt-6 space-y-4">
-        <Field label="Password">
-          <input type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} autoFocus />
-        </Field>
-        {error && <div className="text-red-600 text-sm">{error}</div>}
-        <button disabled={busy} className="w-full bg-neutral-900 text-white font-bold text-sm uppercase tracking-widest py-2.5 rounded-lg hover:bg-neutral-700 disabled:opacity-50">
-          {busy ? "Memproses..." : "Masuk"}
-        </button>
-      </form>
+    <div className="min-h-screen bg-[#0b1330] flex items-center justify-center px-4">
+      <div className="w-full max-w-sm bg-white rounded-2xl shadow-xl p-8">
+        <div className="w-12 h-12 rounded-xl bg-[#1d2b6b] text-white flex items-center justify-center font-black text-xl mb-4">P</div>
+        <h1 className="text-xl font-black">Admin Bon Persediaan</h1>
+        <p className="text-sm text-neutral-500 mt-1">Lapas Palangkaraya — khusus admin</p>
+        <form onSubmit={submit} className="mt-6 space-y-4">
+          <Field label="Username">
+            <input className={inputCls} value={username} onChange={(e) => setUsername(e.target.value)} autoFocus />
+          </Field>
+          <Field label="Password">
+            <input type="password" className={inputCls} value={password} onChange={(e) => setPassword(e.target.value)} />
+          </Field>
+          {error && <div className="text-red-600 text-sm">{error}</div>}
+          <button disabled={busy} className="w-full bg-[#1d2b6b] text-white font-bold text-sm uppercase tracking-widest py-2.5 rounded-lg hover:bg-[#141d4a] disabled:opacity-50">
+            {busy ? "Memproses..." : "Masuk"}
+          </button>
+        </form>
+      </div>
     </div>
   );
 }
 
-function StatCard({ label, value, alert }) {
+function StatCard({ label, value, alert, icon, color }) {
   return (
     <div className={`border rounded-xl p-4 bg-white ${alert ? "border-red-300" : "border-neutral-200"}`}>
-      <div className="text-xs font-bold uppercase tracking-widest text-neutral-500">{label}</div>
+      <div className="flex items-center justify-between">
+        <div className="text-xs font-bold uppercase tracking-widest text-neutral-500">{label}</div>
+        {icon && (
+          <div className={`w-8 h-8 rounded-lg ${color || "bg-neutral-100"} flex items-center justify-center text-sm`}>{icon}</div>
+        )}
+      </div>
       <div className={`text-2xl font-black mt-1 ${alert ? "text-red-600" : ""}`}>{value}</div>
     </div>
   );
@@ -829,15 +911,18 @@ const NAV_ALL = [...NAV_MAIN, ...NAV_DATA];
 
 function AdminSidebar({ tab, setTab, onLogout }) {
   return (
-    <aside className="hidden md:flex md:flex-col md:w-64 shrink-0 bg-neutral-900 text-white min-h-screen sticky top-0">
-      <div className="px-5 py-6 border-b border-white/10">
-        <div className="font-black tracking-wide text-sm uppercase">Bon Persediaan</div>
-        <div className="text-xs text-neutral-400 mt-0.5">Lapas Palangkaraya</div>
+    <aside className="hidden md:flex md:flex-col md:w-64 shrink-0 bg-[#0b1330] text-white min-h-screen sticky top-0">
+      <div className="px-5 py-6 border-b border-white/10 flex items-center gap-2.5">
+        <div className="w-9 h-9 rounded-lg bg-[#2b3f8c] flex items-center justify-center font-black text-sm shrink-0">P</div>
+        <div>
+          <div className="font-black tracking-wide text-sm uppercase leading-tight">Bon Persediaan</div>
+          <div className="text-xs text-neutral-400 mt-0.5">Lapas Palangkaraya</div>
+        </div>
       </div>
       <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
         {NAV_MAIN.map((n) => (
           <button key={n.key} onClick={() => setTab(n.key)}
-            className={`w-full flex items-center gap-2 text-left text-sm font-semibold px-3 py-2.5 rounded-lg transition ${tab === n.key ? "bg-white text-neutral-900" : "text-neutral-200 hover:bg-white/10"}`}>
+            className={`w-full flex items-center gap-2 text-left text-sm font-semibold px-3 py-2.5 rounded-lg transition ${tab === n.key ? "bg-[#2b3f8c] text-white" : "text-neutral-300 hover:bg-white/10"}`}>
             <span>{n.icon}</span>
             <span>{n.label}</span>
           </button>
@@ -845,14 +930,15 @@ function AdminSidebar({ tab, setTab, onLogout }) {
         <div className="pt-4 pb-1 px-3 text-[10px] font-bold uppercase tracking-widest text-neutral-500">Manajemen Data</div>
         {NAV_DATA.map((n) => (
           <button key={n.key} onClick={() => setTab(n.key)}
-            className={`w-full flex items-center gap-2 text-left text-sm font-semibold px-3 py-2.5 rounded-lg transition ${tab === n.key ? "bg-white text-neutral-900" : "text-neutral-200 hover:bg-white/10"}`}>
+            className={`w-full flex items-center gap-2 text-left text-sm font-semibold px-3 py-2.5 rounded-lg transition ${tab === n.key ? "bg-[#2b3f8c] text-white" : "text-neutral-300 hover:bg-white/10"}`}>
             <span>{n.icon}</span>
             <span>{n.label}</span>
           </button>
         ))}
       </nav>
-      <div className="px-3 py-4 border-t border-white/10">
+      <div className="px-3 py-4 border-t border-white/10 space-y-2">
         <button onClick={onLogout} className="w-full border border-white/20 text-xs font-bold uppercase tracking-widest px-4 py-2.5 rounded-lg hover:bg-white/10">Keluar</button>
+        <div className="text-[10px] text-neutral-500 text-center tracking-widest">v1.0.0</div>
       </div>
     </aside>
   );
@@ -881,44 +967,60 @@ function DashboardHome({ stats, items }) {
     byCategory[cat].stock += it.current_stock || 0;
   });
   const catRows = Object.entries(byCategory).sort((a, b) => b[1].stock - a[1].stock);
+  const maxCatStock = Math.max(1, ...catRows.map(([, v]) => v.stock));
+  const barColors = ["bg-blue-500", "bg-emerald-500", "bg-amber-500", "bg-red-500", "bg-purple-500", "bg-neutral-400"];
 
   return (
     <div>
       <h1 className="text-2xl font-black">Dashboard</h1>
+      <p className="text-neutral-500 text-sm mt-1">Ringkasan persediaan LP PKY.</p>
       {stats && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
-          <StatCard label="Total Item" value={items.length} />
-          <StatCard label="Stok Tersedia" value={fmtNum(totalStock)} />
-          <StatCard label="Bon Pending" value={stats.pending_bon} alert={stats.pending_bon > 0} />
-          <StatCard label="Barang Stok Rendah" value={stats.low_stock_items} alert={stats.low_stock_items > 0} />
+        <div className="grid grid-cols-2 lg:grid-cols-5 gap-3 mt-6">
+          <StatCard icon="📦" color="bg-blue-100" label="Total Item Barang" value={fmtNum(items.length)} />
+          <StatCard icon="✅" color="bg-emerald-100" label="Stok Tersedia" value={fmtNum(totalStock)} />
+          <StatCard icon="⚠️" color="bg-amber-100" label="Stok Menipis" value={stats.low_stock_items} alert={stats.low_stock_items > 0} />
+          <StatCard icon="📤" color="bg-red-100" label="Barang Keluar (Bulan Ini)" value={fmtNum(stats.keluar_bulan_ini)} />
+          <StatCard icon="📥" color="bg-sky-100" label="Barang Masuk (Bulan Ini)" value={fmtNum(stats.masuk_bulan_ini)} />
         </div>
       )}
-      <Card className="mt-6">
-        <div className="font-bold mb-4">Kategori Barang</div>
-        <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto -mx-1">
-          <table className="w-full text-sm min-w-[400px]">
-            <thead>
-              <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
-                <th className="p-3">Kategori</th>
-                <th className="p-3">Jumlah Item</th>
-                <th className="p-3">Total Stok</th>
-              </tr>
-            </thead>
-            <tbody>
-              {catRows.map(([cat, v]) => (
-                <tr key={cat} className="border-b border-neutral-100 last:border-0">
-                  <td className="p-3 font-semibold">{cat}</td>
-                  <td className="p-3">{v.count}</td>
-                  <td className="p-3">{fmtNum(v.stock)}</td>
-                </tr>
-              ))}
-              {catRows.length === 0 && (
-                <tr><td colSpan="3" className="p-3 text-sm text-neutral-400">Belum ada barang.</td></tr>
-              )}
-            </tbody>
-          </table>
-        </div>
-      </Card>
+
+      <div className="grid lg:grid-cols-2 gap-6 mt-6">
+        <Card>
+          <div className="font-bold mb-4">Kategori Barang</div>
+          <div className="space-y-3">
+            {catRows.map(([cat, v], i) => (
+              <div key={cat}>
+                <div className="flex justify-between text-xs mb-1">
+                  <span className="font-semibold">{cat}</span>
+                  <span className="text-neutral-400">{v.count} item &middot; {fmtNum(v.stock)} stok</span>
+                </div>
+                <div className="h-2 rounded-full bg-neutral-100 overflow-hidden">
+                  <div className={`h-full rounded-full ${barColors[i % barColors.length]}`} style={{ width: `${Math.max(4, (v.stock / maxCatStock) * 100)}%` }} />
+                </div>
+              </div>
+            ))}
+            {catRows.length === 0 && <div className="text-sm text-neutral-400">Belum ada barang.</div>}
+          </div>
+        </Card>
+
+        <Card>
+          <div className="font-bold mb-4">Status Bon</div>
+          <div className="space-y-3 text-sm">
+            <div className="flex items-center justify-between border-b border-neutral-100 pb-2">
+              <span className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-yellow-400"></span> Menunggu Persetujuan</span>
+              <span className="font-bold">{stats ? stats.pending_bon : "-"}</span>
+            </div>
+            <div className="flex items-center justify-between border-b border-neutral-100 pb-2">
+              <span className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-green-500"></span> Disetujui</span>
+              <span className="font-bold">{stats ? stats.approved_bon : "-"}</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="flex items-center gap-2"><span className="w-2.5 h-2.5 rounded-full bg-red-500"></span> Ditolak</span>
+              <span className="font-bold">{stats ? stats.rejected_bon : "-"}</span>
+            </div>
+          </div>
+        </Card>
+      </div>
     </div>
   );
 }
@@ -1432,6 +1534,13 @@ function AdminDashboard({ token, onLogout }) {
     <div className="min-h-screen flex">
       <AdminSidebar tab={tab} setTab={setTab} onLogout={onLogout} />
       <div className="flex-1 min-w-0">
+        <div className="hidden md:flex items-center justify-between px-8 py-4 border-b border-neutral-200 bg-white sticky top-0 z-10">
+          <div className="font-bold text-sm text-neutral-700">{(NAV_ALL.find((n) => n.key === tab) || {}).label || "Dashboard"}</div>
+          <div className="flex items-center gap-2">
+            <div className="w-8 h-8 rounded-full bg-neutral-900 text-white flex items-center justify-center text-xs font-bold">A</div>
+            <span className="text-sm font-semibold text-neutral-700">Admin</span>
+          </div>
+        </div>
         <div className="max-w-5xl mx-auto px-4 py-6 md:py-10">
           <div className="md:hidden flex items-center justify-between mb-4">
             <h1 className="text-xl font-black">Bon Persediaan</h1>
@@ -1471,7 +1580,12 @@ function AdminDashboard({ token, onLogout }) {
                   <Card key={b.id}>
                     <div className="flex justify-between items-start flex-wrap gap-2">
                       <div>
-                        <div className="font-bold">{b.requester_name} — {b.room}</div>
+                        <div className="font-bold flex items-center gap-2 flex-wrap">
+                          <span>{b.requester_name} — {b.room}</span>
+                          {b.jenis === "nota_dinas" && (
+                            <span className="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-purple-100 text-purple-800">Nota Dinas</span>
+                          )}
+                        </div>
                         <div className="text-xs text-neutral-400">{fmtDate(b.requested_at)}</div>
                       </div>
                       <span className={`text-xs font-bold uppercase px-2 py-1 rounded ${b.status === "pending" ? "bg-yellow-100 text-yellow-800" : b.status === "approved" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
