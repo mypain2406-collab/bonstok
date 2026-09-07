@@ -20,6 +20,7 @@ from motor.motor_asyncio import AsyncIOMotorClient
 
 MONGO_URL = os.environ.get("MONGO_URL", "mongodb://localhost:27017")
 DB_NAME = os.environ.get("DB_NAME", "bonstok")
+ADMIN_USERNAME = os.environ.get("ADMIN_USERNAME", "admin")
 ADMIN_PASSWORD = os.environ.get("ADMIN_PASSWORD", "changeme123")
 NURSE_PASSWORD = os.environ.get("NURSE_PASSWORD", "changeme456")
 TOKEN_SECRET = os.environ.get("TOKEN_SECRET", "change-this-secret")
@@ -113,6 +114,7 @@ async def require_nurse(authorization: Optional[str] = Header(None)):
 # ---------------- Models ----------------
 
 class LoginPayload(BaseModel):
+    username: Optional[str] = None
     password: str
 
 
@@ -140,7 +142,9 @@ class ImportCommitPayload(BaseModel):
 
 
 class BonItemLine(BaseModel):
-    item_id: str
+    item_id: Optional[str] = None
+    item_name: Optional[str] = None  # dipakai kalau item_id kosong (nota dinas, barang di luar stok)
+    unit: Optional[str] = None
     qty: float
 
 
@@ -150,6 +154,7 @@ class BonRequestPayload(BaseModel):
     room: str
     items: List[BonItemLine]
     note: Optional[str] = None
+    jenis: str = "persediaan"  # "persediaan" | "nota_dinas"
 
 
 class MedicinePayload(BaseModel):
@@ -268,20 +273,34 @@ async def submit_bon(payload: BonRequestPayload):
     if not room_name or not room_name.strip():
         raise HTTPException(status_code=400, detail="Ruangan wajib diisi")
 
+    jenis = payload.jenis if payload.jenis in ("persediaan", "nota_dinas") else "persediaan"
+
     lines = []
     for line in payload.items:
-        item = await db.items.find_one({"id": line.item_id})
-        if not item:
-            raise HTTPException(status_code=404, detail=f"Barang tidak ditemukan: {line.item_id}")
         if line.qty <= 0:
             raise HTTPException(status_code=400, detail="Jumlah harus lebih dari 0")
-        lines.append({
-            "item_id": item["id"],
-            "item_name": item["name"],
-            "barcode": item["barcode"],
-            "unit": item.get("unit", "pcs"),
-            "qty": line.qty,
-        })
+        if jenis == "nota_dinas":
+            name = (line.item_name or "").strip()
+            if not name:
+                raise HTTPException(status_code=400, detail="Nama barang wajib diisi")
+            lines.append({
+                "item_id": None,
+                "item_name": name,
+                "barcode": None,
+                "unit": (line.unit or "pcs"),
+                "qty": line.qty,
+            })
+        else:
+            item = await db.items.find_one({"id": line.item_id})
+            if not item:
+                raise HTTPException(status_code=404, detail=f"Barang tidak ditemukan: {line.item_id}")
+            lines.append({
+                "item_id": item["id"],
+                "item_name": item["name"],
+                "barcode": item["barcode"],
+                "unit": item.get("unit", "pcs"),
+                "qty": line.qty,
+            })
 
     doc = {
         "id": new_id(),
@@ -290,6 +309,7 @@ async def submit_bon(payload: BonRequestPayload):
         "room": room_name,
         "items": lines,
         "note": payload.note,
+        "jenis": jenis,
         "status": "pending",
         "requested_at": now_iso(),
         "decided_at": None,
@@ -518,8 +538,9 @@ async def create_medicine_transaction(payload: MedicineTransactionPayload, _: st
 
 @api_router.post("/admin/login")
 async def admin_login(payload: LoginPayload):
-    if not hmac.compare_digest(payload.password, ADMIN_PASSWORD):
-        raise HTTPException(status_code=401, detail="Password salah")
+    username_ok = (payload.username or "").strip() == ADMIN_USERNAME
+    if not username_ok or not hmac.compare_digest(payload.password, ADMIN_PASSWORD):
+        raise HTTPException(status_code=401, detail="Username atau password salah")
     return {"token": make_token("admin")}
 
 
@@ -919,29 +940,30 @@ async def admin_approve_bon(bon_id: str, _: bool = Depends(require_admin)):
     if bon["status"] != "pending":
         raise HTTPException(status_code=400, detail="Bon sudah diproses")
 
-    for line in bon["items"]:
-        item = await db.items.find_one({"id": line["item_id"]})
-        if not item:
-            raise HTTPException(status_code=404, detail=f"Barang {line['item_name']} tidak ditemukan")
-        if item.get("current_stock", 0) < line["qty"]:
-            raise HTTPException(status_code=400, detail=f"Stok {line['item_name']} tidak cukup")
+    if bon.get("jenis", "persediaan") == "persediaan":
+        for line in bon["items"]:
+            item = await db.items.find_one({"id": line["item_id"]})
+            if not item:
+                raise HTTPException(status_code=404, detail=f"Barang {line['item_name']} tidak ditemukan")
+            if item.get("current_stock", 0) < line["qty"]:
+                raise HTTPException(status_code=400, detail=f"Stok {line['item_name']} tidak cukup")
 
-    for line in bon["items"]:
-        await db.items.update_one(
-            {"id": line["item_id"]},
-            {"$inc": {"current_stock": -line["qty"]}},
-        )
-        await db.item_transactions.insert_one({
-            "id": new_id(),
-            "item_id": line["item_id"],
-            "item_name": line["item_name"],
-            "type": "keluar",
-            "qty": line["qty"],
-            "unit": line.get("unit", "pcs"),
-            "photo": None,
-            "note": f"Bon: {bon['requester_name']} - {bon.get('room', '')}",
-            "created_at": now_iso(),
-        })
+        for line in bon["items"]:
+            await db.items.update_one(
+                {"id": line["item_id"]},
+                {"$inc": {"current_stock": -line["qty"]}},
+            )
+            await db.item_transactions.insert_one({
+                "id": new_id(),
+                "item_id": line["item_id"],
+                "item_name": line["item_name"],
+                "type": "keluar",
+                "qty": line["qty"],
+                "unit": line.get("unit", "pcs"),
+                "photo": None,
+                "note": f"Bon: {bon['requester_name']} - {bon.get('room', '')}",
+                "created_at": now_iso(),
+            })
 
     await db.bon_requests.update_one(
         {"id": bon_id},
@@ -1506,6 +1528,23 @@ async def admin_stats(_: bool = Depends(require_admin)):
     rejected_bon = await db.bon_requests.count_documents({"status": "rejected"})
     total_rooms = await db.rooms.count_documents({})
 
+    now = datetime.now(timezone.utc)
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    txs = await db.item_transactions.find({}, {"_id": 0, "type": 1, "qty": 1, "created_at": 1}).to_list(20000)
+    keluar_bulan_ini = 0.0
+    masuk_bulan_ini = 0.0
+    for tx in txs:
+        try:
+            ts = datetime.fromisoformat(tx["created_at"])
+        except Exception:
+            continue
+        if ts < month_start:
+            continue
+        if tx.get("type") == "keluar":
+            keluar_bulan_ini += tx.get("qty", 0)
+        elif tx.get("type") == "masuk":
+            masuk_bulan_ini += tx.get("qty", 0)
+
     return {
         "total_items": total_items,
         "low_stock_items": low_stock_items,
@@ -1515,6 +1554,8 @@ async def admin_stats(_: bool = Depends(require_admin)):
         "approved_bon": approved_bon,
         "rejected_bon": rejected_bon,
         "total_rooms": total_rooms,
+        "keluar_bulan_ini": keluar_bulan_ini,
+        "masuk_bulan_ini": masuk_bulan_ini,
     }
 
 
