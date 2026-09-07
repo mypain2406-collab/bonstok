@@ -434,7 +434,8 @@ def build_nota_dinas_docx(bon):
             t2.cell(i, 0).text = str(i)
             t2.cell(i, 1).text = it.get("item_name", "")
             t2.cell(i, 2).text = f"{fmt_num(it.get('qty', 0))} {it.get('unit', '')}".strip()
-            t2.cell(i, 3).text = "…………………………."
+            realisasi = it.get("realisasi_qty")
+            t2.cell(i, 3).text = f"{fmt_num(realisasi)} {it.get('unit', '')}".strip() if realisasi is not None else "…………………………."
             for c in (0, 1, 2, 3):
                 for p in t2.cell(i, c).paragraphs:
                     for r in p.runs:
@@ -932,42 +933,67 @@ async def admin_list_bon(status: Optional[str] = None, _: bool = Depends(require
     return items
 
 
+class BonApprovePayload(BaseModel):
+    # Realisasi (jumlah barang yang benar-benar diberikan) per baris item, searah
+    # index dengan bon["items"]. Kalau tidak diisi (None) untuk suatu baris, atau
+    # payload-nya kosong sama sekali, default-nya = jumlah yang diminta (qty).
+    realizations: Optional[List[Optional[float]]] = None
+
+
 @api_router.post("/admin/bon/{bon_id}/approve")
-async def admin_approve_bon(bon_id: str, _: bool = Depends(require_admin)):
+async def admin_approve_bon(bon_id: str, payload: BonApprovePayload = BonApprovePayload(), _: bool = Depends(require_admin)):
     bon = await db.bon_requests.find_one({"id": bon_id})
     if not bon:
         raise HTTPException(status_code=404, detail="Bon tidak ditemukan")
     if bon["status"] != "pending":
         raise HTTPException(status_code=400, detail="Bon sudah diproses")
 
+    items = bon["items"]
+    realizations = payload.realizations or []
+
+    def realized_qty_for(idx, line):
+        if idx < len(realizations) and realizations[idx] is not None:
+            return realizations[idx]
+        return line["qty"]
+
     if bon.get("jenis", "persediaan") == "persediaan":
-        for line in bon["items"]:
+        for idx, line in enumerate(items):
             item = await db.items.find_one({"id": line["item_id"]})
             if not item:
                 raise HTTPException(status_code=404, detail=f"Barang {line['item_name']} tidak ditemukan")
-            if item.get("current_stock", 0) < line["qty"]:
+            realized = realized_qty_for(idx, line)
+            if realized < 0:
+                raise HTTPException(status_code=400, detail="Realisasi tidak boleh kurang dari 0")
+            if item.get("current_stock", 0) < realized:
                 raise HTTPException(status_code=400, detail=f"Stok {line['item_name']} tidak cukup")
 
-        for line in bon["items"]:
+        for idx, line in enumerate(items):
+            realized = realized_qty_for(idx, line)
+            line["realisasi_qty"] = realized
             await db.items.update_one(
                 {"id": line["item_id"]},
-                {"$inc": {"current_stock": -line["qty"]}},
+                {"$inc": {"current_stock": -realized}},
             )
             await db.item_transactions.insert_one({
                 "id": new_id(),
                 "item_id": line["item_id"],
                 "item_name": line["item_name"],
                 "type": "keluar",
-                "qty": line["qty"],
+                "qty": realized,
                 "unit": line.get("unit", "pcs"),
                 "photo": None,
                 "note": f"Bon: {bon['requester_name']} - {bon.get('room', '')}",
                 "created_at": now_iso(),
             })
+    else:
+        # Nota dinas tidak memotong stok, tapi realisasi tetap dicatat untuk
+        # ditampilkan di daftar admin & dokumen Nota Dinas.
+        for idx, line in enumerate(items):
+            line["realisasi_qty"] = realized_qty_for(idx, line)
 
     await db.bon_requests.update_one(
         {"id": bon_id},
-        {"$set": {"status": "approved", "decided_at": now_iso()}},
+        {"$set": {"status": "approved", "decided_at": now_iso(), "items": items}},
     )
     updated = await db.bon_requests.find_one({"id": bon_id}, {"_id": 0})
     return updated
