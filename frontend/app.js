@@ -813,12 +813,248 @@ function StatCard({ label, value, alert }) {
   );
 }
 
-const TABS = [
-  { key: "bon", label: "Approval Bon" },
-  { key: "items", label: "Persediaan" },
-  { key: "rooms", label: "Ruangan" },
-  { key: "klinik", label: "Manajemen Klinik" },
+const NAV_MAIN = [
+  { key: "dashboard", label: "Dashboard", icon: "\ud83d\udcca" },
+  { key: "bon", label: "Bon Barang Persediaan", icon: "\ud83d\udcdd" },
+  { key: "keluar", label: "Mutasi Keluar", icon: "\ud83d\udce4" },
+  { key: "masuk", label: "Mutasi Masuk", icon: "\ud83d\udce5" },
+  { key: "klinik", label: "Persediaan Obat Klinik", icon: "\ud83d\udc89" },
 ];
+const NAV_DATA = [
+  { key: "items", label: "Data Barang", icon: "\ud83d\udce6" },
+  { key: "rooms", label: "Ruangan", icon: "\ud83c\udfe2" },
+  { key: "report", label: "Laporan", icon: "\ud83d\udcc4" },
+];
+const NAV_ALL = [...NAV_MAIN, ...NAV_DATA];
+
+function AdminSidebar({ tab, setTab, onLogout }) {
+  return (
+    <aside className="hidden md:flex md:flex-col md:w-64 shrink-0 bg-neutral-900 text-white min-h-screen sticky top-0">
+      <div className="px-5 py-6 border-b border-white/10">
+        <div className="font-black tracking-wide text-sm uppercase">Bon Persediaan</div>
+        <div className="text-xs text-neutral-400 mt-0.5">Lapas Palangkaraya</div>
+      </div>
+      <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+        {NAV_MAIN.map((n) => (
+          <button key={n.key} onClick={() => setTab(n.key)}
+            className={`w-full flex items-center gap-2 text-left text-sm font-semibold px-3 py-2.5 rounded-lg transition ${tab === n.key ? "bg-white text-neutral-900" : "text-neutral-200 hover:bg-white/10"}`}>
+            <span>{n.icon}</span>
+            <span>{n.label}</span>
+          </button>
+        ))}
+        <div className="pt-4 pb-1 px-3 text-[10px] font-bold uppercase tracking-widest text-neutral-500">Manajemen Data</div>
+        {NAV_DATA.map((n) => (
+          <button key={n.key} onClick={() => setTab(n.key)}
+            className={`w-full flex items-center gap-2 text-left text-sm font-semibold px-3 py-2.5 rounded-lg transition ${tab === n.key ? "bg-white text-neutral-900" : "text-neutral-200 hover:bg-white/10"}`}>
+            <span>{n.icon}</span>
+            <span>{n.label}</span>
+          </button>
+        ))}
+      </nav>
+      <div className="px-3 py-4 border-t border-white/10">
+        <button onClick={onLogout} className="w-full border border-white/20 text-xs font-bold uppercase tracking-widest px-4 py-2.5 rounded-lg hover:bg-white/10">Keluar</button>
+      </div>
+    </aside>
+  );
+}
+
+function MobileTabBar({ tab, setTab }) {
+  return (
+    <div className="md:hidden flex gap-1 flex-wrap mb-6 border-b border-neutral-200">
+      {NAV_ALL.map((n) => (
+        <button key={n.key} onClick={() => setTab(n.key)}
+          className={`px-3 py-2 text-xs font-bold uppercase tracking-wide border-b-2 -mb-px ${tab === n.key ? "border-neutral-900 text-neutral-900" : "border-transparent text-neutral-400"}`}>
+          {n.label}
+        </button>
+      ))}
+    </div>
+  );
+}
+
+function DashboardHome({ stats, items }) {
+  const totalStock = items.reduce((sum, it) => sum + (it.current_stock || 0), 0);
+  const byCategory = {};
+  items.forEach((it) => {
+    const cat = it.category || "Tanpa Kategori";
+    if (!byCategory[cat]) byCategory[cat] = { count: 0, stock: 0 };
+    byCategory[cat].count += 1;
+    byCategory[cat].stock += it.current_stock || 0;
+  });
+  const catRows = Object.entries(byCategory).sort((a, b) => b[1].stock - a[1].stock);
+
+  return (
+    <div>
+      <h1 className="text-2xl font-black">Dashboard</h1>
+      {stats && (
+        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
+          <StatCard label="Total Item" value={items.length} />
+          <StatCard label="Stok Tersedia" value={fmtNum(totalStock)} />
+          <StatCard label="Bon Pending" value={stats.pending_bon} alert={stats.pending_bon > 0} />
+          <StatCard label="Barang Stok Rendah" value={stats.low_stock_items} alert={stats.low_stock_items > 0} />
+        </div>
+      )}
+      <Card className="mt-6">
+        <div className="font-bold mb-4">Kategori Barang</div>
+        <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto -mx-1">
+          <table className="w-full text-sm min-w-[400px]">
+            <thead>
+              <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                <th className="p-3">Kategori</th>
+                <th className="p-3">Jumlah Item</th>
+                <th className="p-3">Total Stok</th>
+              </tr>
+            </thead>
+            <tbody>
+              {catRows.map(([cat, v]) => (
+                <tr key={cat} className="border-b border-neutral-100 last:border-0">
+                  <td className="p-3 font-semibold">{cat}</td>
+                  <td className="p-3">{v.count}</td>
+                  <td className="p-3">{fmtNum(v.stock)}</td>
+                </tr>
+              ))}
+              {catRows.length === 0 && (
+                <tr><td colSpan="3" className="p-3 text-sm text-neutral-400">Belum ada barang.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function MutasiKeluarPanel({ items, itemTx, onItemTx }) {
+  const [itemId, setItemId] = useState("");
+  const [unit, setUnit] = useState("pcs");
+  const [qty, setQty] = useState(1);
+  const [note, setNote] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState("");
+
+  const submit = async (e) => {
+    e.preventDefault();
+    setError("");
+    if (!itemId) { setError("Pilih barang dulu"); return; }
+    if (!qty || Number(qty) <= 0) { setError("Jumlah harus lebih dari 0"); return; }
+    setSubmitting(true);
+    try {
+      await onItemTx({ item_id: itemId, type: "keluar", qty: Number(qty), unit, note });
+      setQty(1);
+      setNote("");
+    } catch (err) {
+      setError(err.message);
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  const keluarHistory = itemTx.filter((h) => h.type === "keluar");
+
+  return (
+    <div className="space-y-6">
+      <h1 className="text-2xl font-black">Mutasi Keluar</h1>
+      <Card>
+        <div className="font-bold mb-4">Catat Barang Keluar</div>
+        <form onSubmit={submit} className="space-y-4">
+          <Field label="Nama Barang">
+            <select className={inputCls} value={itemId} onChange={(e) => setItemId(e.target.value)}>
+              <option value="">-- Pilih barang --</option>
+              {items.map((it) => (
+                <option key={it.id} value={it.id}>{it.name} (stok: {fmtNum(it.current_stock)} {it.unit})</option>
+              ))}
+            </select>
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Jumlah">
+              <input type="number" min="1" className={inputCls} value={qty} onChange={(e) => setQty(e.target.value)} />
+            </Field>
+            <Field label="Satuan">
+              <input className={inputCls} value={unit} onChange={(e) => setUnit(e.target.value)} placeholder="pcs, rim, botol, dus..." />
+            </Field>
+          </div>
+          <Field label="Catatan (opsional)">
+            <input className={inputCls} value={note} onChange={(e) => setNote(e.target.value)} placeholder="Contoh: dipakai untuk kegiatan X..." />
+          </Field>
+          {error && <div className="text-red-600 text-sm">{error}</div>}
+          <button disabled={submitting} className="w-full bg-neutral-900 text-white font-bold text-sm uppercase tracking-widest py-2.5 rounded-lg hover:bg-neutral-700 disabled:opacity-50">
+            {submitting ? "Menyimpan..." : "Simpan Barang Keluar"}
+          </button>
+        </form>
+      </Card>
+
+      <Card>
+        <div className="font-bold mb-3">Riwayat Barang Keluar</div>
+        <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto -mx-1">
+          <table className="w-full text-sm min-w-[600px]">
+            <thead>
+              <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                <th className="p-3">Waktu</th>
+                <th className="p-3">Barang</th>
+                <th className="p-3">Jumlah</th>
+                <th className="p-3">Catatan</th>
+              </tr>
+            </thead>
+            <tbody>
+              {keluarHistory.map((h) => (
+                <tr key={h.id} className="border-b border-neutral-100 last:border-0">
+                  <td className="p-3 text-xs text-neutral-500 whitespace-nowrap">{fmtDate(h.created_at)}</td>
+                  <td className="p-3 font-semibold">{h.item_name}</td>
+                  <td className="p-3">{fmtNum(h.qty)} {h.unit}</td>
+                  <td className="p-3 text-xs text-neutral-500">{h.note || "-"}</td>
+                </tr>
+              ))}
+              {keluarHistory.length === 0 && (
+                <tr><td colSpan="4" className="p-3 text-sm text-neutral-400">Belum ada riwayat.</td></tr>
+              )}
+            </tbody>
+          </table>
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function LaporanPanel({ onDownload }) {
+  const [reportModule, setReportModule] = useState("items");
+  const [start, setStart] = useState("");
+  const [end, setEnd] = useState("");
+
+  return (
+    <div className="space-y-6">
+      <h1 className="text-2xl font-black">Laporan</h1>
+      <Card>
+        <div className="font-bold mb-4">Unduh Laporan Keluar Masuk Barang</div>
+        <div className="grid sm:grid-cols-2 gap-3">
+          <Field label="Modul">
+            <select className={inputCls} value={reportModule} onChange={(e) => setReportModule(e.target.value)}>
+              <option value="items">Barang Gudang</option>
+              <option value="medicines">Obat Klinik</option>
+            </select>
+          </Field>
+          <div className="grid grid-cols-2 gap-3">
+            <Field label="Dari Tanggal">
+              <input type="date" className={inputCls} value={start} onChange={(e) => setStart(e.target.value)} />
+            </Field>
+            <Field label="Sampai Tanggal">
+              <input type="date" className={inputCls} value={end} onChange={(e) => setEnd(e.target.value)} />
+            </Field>
+          </div>
+        </div>
+        <div className="flex gap-2 mt-4">
+          <button onClick={() => onDownload(reportModule, "pdf", start, end)}
+            className="flex-1 border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase hover:bg-neutral-50">
+            Unduh PDF
+          </button>
+          <button onClick={() => onDownload(reportModule, "xlsx", start, end)}
+            className="flex-1 border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase hover:bg-neutral-50">
+            Unduh Excel
+          </button>
+        </div>
+        <p className="text-xs text-neutral-400 mt-3">Laporan berisi total masuk, total keluar dalam periode, dan saldo stok saat ini untuk tiap barang.</p>
+      </Card>
+    </div>
+  );
+}
 
 function ImportItemsPanel({ authHeaders, onImported }) {
   const [file, setFile] = useState(null);
@@ -1014,7 +1250,7 @@ function ImportItemsPanel({ authHeaders, onImported }) {
 
 function AdminDashboard({ token, onLogout }) {
   const authHeaders = { Authorization: `Bearer ${token}` };
-  const [tab, setTab] = useState("bon");
+  const [tab, setTab] = useState("dashboard");
   const [stats, setStats] = useState(null);
   const [bonList, setBonList] = useState([]);
   const [bonFilter, setBonFilter] = useState("pending");
@@ -1176,197 +1412,214 @@ function AdminDashboard({ token, onLogout }) {
     return r.json();
   };
 
+  const submitItemTx = async (payload) => {
+    const r = await fetch(`${API_BASE}/admin/items/transaction`, {
+      method: "POST",
+      headers: { ...authHeaders, "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!r.ok) {
+      const err = await r.json().catch(() => ({}));
+      throw new Error(err.detail || "Gagal mencatat mutasi barang");
+    }
+    loadAll();
+    return r.json();
+  };
+
   if (loading) return <div className="max-w-5xl mx-auto px-4 py-16 text-neutral-500">Memuat...</div>;
 
   return (
-    <div className="max-w-5xl mx-auto px-4 py-10">
-      <div className="flex items-center justify-between flex-wrap gap-3">
-        <h1 className="text-2xl font-black">Dashboard Admin</h1>
-        <button onClick={onLogout} className="border border-neutral-300 text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg">Keluar</button>
-      </div>
-
-      {stats && (
-        <div className="grid grid-cols-2 sm:grid-cols-4 gap-3 mt-6">
-          <StatCard label="Bon Pending" value={stats.pending_bon} alert={stats.pending_bon > 0} />
-          <StatCard label="Barang Stok Rendah" value={stats.low_stock_items} alert={stats.low_stock_items > 0} />
-          <StatCard label="Obat Stok Rendah" value={stats.low_stock_medicines} alert={stats.low_stock_medicines > 0} />
-          <StatCard label="Total Barang" value={stats.total_items} />
-        </div>
-      )}
-
-      <div className="flex gap-1 flex-wrap mt-8 border-b border-neutral-200">
-        {TABS.map((t) => (
-          <button key={t.key} onClick={() => setTab(t.key)}
-            className={`px-4 py-2 text-sm font-bold uppercase tracking-wide border-b-2 -mb-px ${tab === t.key ? "border-neutral-900 text-neutral-900" : "border-transparent text-neutral-400"}`}>
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {tab === "bon" && (
-        <div className="mt-6">
-          <div className="flex gap-2 mb-4">
-            {["pending", "approved", "rejected", ""].map((s) => (
-              <button key={s || "all"} onClick={() => setBonFilter(s)}
-                className={`text-xs font-bold uppercase px-3 py-1.5 rounded-lg border ${bonFilter === s ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300"}`}>
-                {s || "Semua"}
-              </button>
-            ))}
+    <div className="min-h-screen flex">
+      <AdminSidebar tab={tab} setTab={setTab} onLogout={onLogout} />
+      <div className="flex-1 min-w-0">
+        <div className="max-w-5xl mx-auto px-4 py-6 md:py-10">
+          <div className="md:hidden flex items-center justify-between mb-4">
+            <h1 className="text-xl font-black">Bon Persediaan</h1>
+            <button onClick={onLogout} className="border border-neutral-300 text-xs font-bold uppercase tracking-widest px-3 py-1.5 rounded-lg">Keluar</button>
           </div>
-          <div className="space-y-3">
-            {bonList.map((b) => (
-              <Card key={b.id}>
-                <div className="flex justify-between items-start flex-wrap gap-2">
-                  <div>
-                    <div className="font-bold">{b.requester_name} — {b.room}</div>
-                    <div className="text-xs text-neutral-400">{fmtDate(b.requested_at)}</div>
-                  </div>
-                  <span className={`text-xs font-bold uppercase px-2 py-1 rounded ${b.status === "pending" ? "bg-yellow-100 text-yellow-800" : b.status === "approved" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
-                    {b.status}
-                  </span>
+          <MobileTabBar tab={tab} setTab={setTab} />
+
+          {tab === "dashboard" && <DashboardHome stats={stats} items={items} />}
+
+          {tab === "keluar" && (
+            <MutasiKeluarPanel items={items} itemTx={itemTx} onItemTx={submitItemTx} />
+          )}
+
+          {tab === "masuk" && (
+            <div className="space-y-6">
+              <h1 className="text-2xl font-black">Mutasi Masuk</h1>
+              <ImportItemsPanel authHeaders={authHeaders} onImported={loadAll} />
+              <PersediaanTab items={items} itemTx={itemTx} onStockIn={submitStockIn} />
+            </div>
+          )}
+
+          {tab === "report" && <LaporanPanel onDownload={downloadReport} />}
+
+          {tab === "bon" && (
+            <div>
+              <h1 className="text-2xl font-black mb-6">Bon Barang Persediaan</h1>
+              <div className="flex gap-2 mb-4">
+                {["pending", "approved", "rejected", ""].map((s) => (
+                  <button key={s || "all"} onClick={() => setBonFilter(s)}
+                    className={`text-xs font-bold uppercase px-3 py-1.5 rounded-lg border ${bonFilter === s ? "bg-neutral-900 text-white border-neutral-900" : "border-neutral-300"}`}>
+                    {s || "Semua"}
+                  </button>
+                ))}
+              </div>
+              <div className="space-y-3">
+                {bonList.map((b) => (
+                  <Card key={b.id}>
+                    <div className="flex justify-between items-start flex-wrap gap-2">
+                      <div>
+                        <div className="font-bold">{b.requester_name} — {b.room}</div>
+                        <div className="text-xs text-neutral-400">{fmtDate(b.requested_at)}</div>
+                      </div>
+                      <span className={`text-xs font-bold uppercase px-2 py-1 rounded ${b.status === "pending" ? "bg-yellow-100 text-yellow-800" : b.status === "approved" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>
+                        {b.status}
+                      </span>
+                    </div>
+                    <ul className="mt-3 text-sm space-y-1">
+                      {b.items.map((line, i) => (
+                        <li key={i} className="flex justify-between border-b border-neutral-100 pb-1">
+                          <span>{line.item_name}</span>
+                          <span className="font-semibold">{fmtNum(line.qty)} {line.unit}</span>
+                        </li>
+                      ))}
+                    </ul>
+                    <div className="flex gap-2 mt-4 flex-wrap">
+                      {b.status === "pending" && (
+                        <>
+                          <button onClick={() => decideBon(b.id, "approve")} className="flex-1 bg-neutral-900 text-white text-xs font-bold uppercase py-2 rounded-lg">Setujui</button>
+                          <button onClick={() => decideBon(b.id, "reject")} className="flex-1 border border-red-300 text-red-600 text-xs font-bold uppercase py-2 rounded-lg">Tolak</button>
+                        </>
+                      )}
+                      <a
+                        href={`${API_BASE}/bon/${b.id}/nota-dinas`}
+                        className="flex-1 text-center border border-neutral-300 text-xs font-bold uppercase py-2 rounded-lg hover:bg-neutral-50"
+                      >
+                        📄 Nota Dinas
+                      </a>
+                    </div>
+                  </Card>
+                ))}
+                {bonList.length === 0 && <div className="text-sm text-neutral-400">Tidak ada bon.</div>}
+              </div>
+            </div>
+          )}
+
+          {tab === "items" && (
+            <div>
+              <h1 className="text-2xl font-black mb-6">Data Barang</h1>
+              <Card>
+                <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
+                  <div className="font-bold">Daftar Barang</div>
+                  <button onClick={() => setEditingItem({ name: "", barcode: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
+                    className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg">
+                    + Barang Baru
+                  </button>
                 </div>
-                <ul className="mt-3 text-sm space-y-1">
-                  {b.items.map((line, i) => (
-                    <li key={i} className="flex justify-between border-b border-neutral-100 pb-1">
-                      <span>{line.item_name}</span>
-                      <span className="font-semibold">{fmtNum(line.qty)} {line.unit}</span>
-                    </li>
-                  ))}
-                </ul>
-                <div className="flex gap-2 mt-4 flex-wrap">
-                  {b.status === "pending" && (
-                    <>
-                      <button onClick={() => decideBon(b.id, "approve")} className="flex-1 bg-neutral-900 text-white text-xs font-bold uppercase py-2 rounded-lg">Setujui</button>
-                      <button onClick={() => decideBon(b.id, "reject")} className="flex-1 border border-red-300 text-red-600 text-xs font-bold uppercase py-2 rounded-lg">Tolak</button>
-                    </>
-                  )}
-                  <a
-                    href={`${API_BASE}/bon/${b.id}/nota-dinas`}
-                    className="flex-1 text-center border border-neutral-300 text-xs font-bold uppercase py-2 rounded-lg hover:bg-neutral-50"
-                  >
-                    📄 Nota Dinas
-                  </a>
+                <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto -mx-1">
+                  <table className="w-full text-sm min-w-[600px]">
+                    <thead>
+                      <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                        <th className="p-3">Nama</th>
+                        <th className="p-3">Barcode</th>
+                        <th className="p-3">Stok</th>
+                        <th className="p-3"></th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {items.map((it) => (
+                        <tr key={it.id} className="border-b border-neutral-100 last:border-0">
+                          <td className="p-3">
+                            <div className="font-semibold">{it.name}</div>
+                            <div className="text-xs text-neutral-400">{it.category}</div>
+                          </td>
+                          <td className="p-3 text-xs text-neutral-500">{it.barcode}</td>
+                          <td className={`p-3 font-bold ${it.current_stock <= it.min_stock ? "text-red-600" : ""}`}>{fmtNum(it.current_stock)} {it.unit}</td>
+                          <td className="p-3 text-right whitespace-nowrap">
+                            <button onClick={() => setEditingItem(it)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
+                            <button onClick={() => deleteItem(it.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
                 </div>
               </Card>
-            ))}
-            {bonList.length === 0 && <div className="text-sm text-neutral-400">Tidak ada bon.</div>}
-          </div>
-        </div>
-      )}
-
-      {tab === "items" && (
-        <div className="mt-6 space-y-6">
-          <ImportItemsPanel authHeaders={authHeaders} onImported={loadAll} />
-
-          <Card>
-            <div className="flex items-center justify-between mb-4 flex-wrap gap-2">
-              <div className="font-bold">Daftar Barang</div>
-              <button onClick={() => setEditingItem({ name: "", barcode: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
-                className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg">
-                + Barang Baru
-              </button>
             </div>
-            <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto -mx-1">
-              <table className="w-full text-sm min-w-[600px]">
-                <thead>
-                  <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
-                    <th className="p-3">Nama</th>
-                    <th className="p-3">Barcode</th>
-                    <th className="p-3">Stok</th>
-                    <th className="p-3"></th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {items.map((it) => (
-                    <tr key={it.id} className="border-b border-neutral-100 last:border-0">
-                      <td className="p-3">
-                        <div className="font-semibold">{it.name}</div>
-                        <div className="text-xs text-neutral-400">{it.category}</div>
-                      </td>
-                      <td className="p-3 text-xs text-neutral-500">{it.barcode}</td>
-                      <td className={`p-3 font-bold ${it.current_stock <= it.min_stock ? "text-red-600" : ""}`}>{fmtNum(it.current_stock)} {it.unit}</td>
-                      <td className="p-3 text-right whitespace-nowrap">
-                        <button onClick={() => setEditingItem(it)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
-                        <button onClick={() => deleteItem(it.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
-                      </td>
+          )}
+
+          {tab === "rooms" && (
+            <div>
+              <h1 className="text-2xl font-black mb-6">Ruangan</h1>
+              <div className="flex gap-2 mb-4 flex-wrap">
+                <button onClick={() => setEditingRoom({ name: "" })}
+                  className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg">
+                  + Ruangan Baru
+                </button>
+                <button onClick={() => rooms.length && printRoomBarcodes(rooms)}
+                  disabled={!rooms.length}
+                  className="border border-neutral-300 text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg disabled:opacity-40">
+                  🖨️ Cetak Semua Barcode
+                </button>
+              </div>
+              <p className="text-xs text-neutral-500 mb-4">Cetak barcode dan tempel di masing-masing ruangan. Saat bon diajukan, barcode ini discan untuk identifikasi ruangan/bagian peminta.</p>
+              <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto">
+                <table className="w-full text-sm min-w-[500px]">
+                  <thead>
+                    <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
+                      <th className="p-3">Nama Ruangan</th>
+                      <th className="p-3">Kode Barcode</th>
+                      <th className="p-3"></th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
+                  </thead>
+                  <tbody>
+                    {rooms.map((r) => (
+                      <tr key={r.id} className="border-b border-neutral-100 last:border-0">
+                        <td className="p-3 font-semibold">{r.name}</td>
+                        <td className="p-3 text-xs text-neutral-500">{r.barcode}</td>
+                        <td className="p-3 text-right whitespace-nowrap">
+                          <button onClick={() => printRoomBarcodes([r])} className="text-xs font-bold uppercase mr-3 underline">Cetak</button>
+                          <button onClick={() => setEditingRoom(r)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
+                          <button onClick={() => deleteRoom(r.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
+                        </td>
+                      </tr>
+                    ))}
+                    {rooms.length === 0 && (
+                      <tr><td colSpan="3" className="p-3 text-sm text-neutral-400">Belum ada ruangan.</td></tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
             </div>
-          </Card>
+          )}
 
-          <PersediaanTab items={items} itemTx={itemTx} onStockIn={submitStockIn} onDownload={downloadReport} />
+          {tab === "klinik" && (
+            <KlinikTab
+              authHeaders={authHeaders}
+              onImported={loadAll}
+              medicines={medicines}
+              medicineTx={history}
+              onMedicineTx={submitMedicineTx}
+              onDownload={downloadReport}
+              onNewMedicine={() => setEditingMedicine({ name: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
+              onEditMedicine={setEditingMedicine}
+              onDeleteMedicine={deleteMedicine}
+            />
+          )}
+
+          {editingItem && (
+            <ItemEditModal item={editingItem} onClose={() => setEditingItem(null)} onSave={saveItem} />
+          )}
+          {editingMedicine && (
+            <MedicineEditModal medicine={editingMedicine} onClose={() => setEditingMedicine(null)} onSave={saveMedicine} />
+          )}
+          {editingRoom && (
+            <RoomEditModal room={editingRoom} onClose={() => setEditingRoom(null)} onSave={saveRoom} />
+          )}
         </div>
-      )}
-
-      {tab === "rooms" && (
-        <div className="mt-6">
-          <div className="flex gap-2 mb-4 flex-wrap">
-            <button onClick={() => setEditingRoom({ name: "" })}
-              className="bg-neutral-900 text-white text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg">
-              + Ruangan Baru
-            </button>
-            <button onClick={() => rooms.length && printRoomBarcodes(rooms)}
-              disabled={!rooms.length}
-              className="border border-neutral-300 text-xs font-bold uppercase tracking-widest px-4 py-2 rounded-lg disabled:opacity-40">
-              🖨️ Cetak Semua Barcode
-            </button>
-          </div>
-          <p className="text-xs text-neutral-500 mb-4">Cetak barcode dan tempel di masing-masing ruangan. Saat bon diajukan, barcode ini discan untuk identifikasi ruangan/bagian peminta.</p>
-          <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto">
-            <table className="w-full text-sm min-w-[500px]">
-              <thead>
-                <tr className="text-left text-xs font-bold uppercase tracking-widest text-neutral-500 border-b border-neutral-200">
-                  <th className="p-3">Nama Ruangan</th>
-                  <th className="p-3">Kode Barcode</th>
-                  <th className="p-3"></th>
-                </tr>
-              </thead>
-              <tbody>
-                {rooms.map((r) => (
-                  <tr key={r.id} className="border-b border-neutral-100 last:border-0">
-                    <td className="p-3 font-semibold">{r.name}</td>
-                    <td className="p-3 text-xs text-neutral-500">{r.barcode}</td>
-                    <td className="p-3 text-right whitespace-nowrap">
-                      <button onClick={() => printRoomBarcodes([r])} className="text-xs font-bold uppercase mr-3 underline">Cetak</button>
-                      <button onClick={() => setEditingRoom(r)} className="text-xs font-bold uppercase mr-3 underline">Edit</button>
-                      <button onClick={() => deleteRoom(r.id)} className="text-xs font-bold uppercase text-red-600 underline">Hapus</button>
-                    </td>
-                  </tr>
-                ))}
-                {rooms.length === 0 && (
-                  <tr><td colSpan="3" className="p-3 text-sm text-neutral-400">Belum ada ruangan.</td></tr>
-                )}
-              </tbody>
-            </table>
-          </div>
-        </div>
-      )}
-
-      {tab === "klinik" && (
-        <KlinikTab
-          authHeaders={authHeaders}
-          onImported={loadAll}
-          medicines={medicines}
-          medicineTx={history}
-          onMedicineTx={submitMedicineTx}
-          onDownload={downloadReport}
-          onNewMedicine={() => setEditingMedicine({ name: "", unit: "pcs", category: "", current_stock: 0, min_stock: 0 })}
-          onEditMedicine={setEditingMedicine}
-          onDeleteMedicine={deleteMedicine}
-        />
-      )}
-
-      {editingItem && (
-        <ItemEditModal item={editingItem} onClose={() => setEditingItem(null)} onSave={saveItem} />
-      )}
-      {editingMedicine && (
-        <MedicineEditModal medicine={editingMedicine} onClose={() => setEditingMedicine(null)} onSave={saveMedicine} />
-      )}
-      {editingRoom && (
-        <RoomEditModal room={editingRoom} onClose={() => setEditingRoom(null)} onSave={saveRoom} />
-      )}
+      </div>
     </div>
   );
 }
@@ -1482,7 +1735,7 @@ function RoomEditModal({ room, onClose, onSave }) {
 
 // ---------------- Admin: Persediaan (stock-in + laporan) ----------------
 
-function PersediaanTab({ items, itemTx, onStockIn, onDownload }) {
+function PersediaanTab({ items, itemTx, onStockIn }) {
   const [mode, setMode] = useState("existing"); // "existing" | "new"
   const [itemId, setItemId] = useState("");
   const [newName, setNewName] = useState("");
@@ -1492,10 +1745,6 @@ function PersediaanTab({ items, itemTx, onStockIn, onDownload }) {
   const [photo, setPhoto] = useState(null);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState("");
-
-  const [reportModule, setReportModule] = useState("items");
-  const [start, setStart] = useState("");
-  const [end, setEnd] = useState("");
 
   const onPhotoChange = (e) => {
     const file = e.target.files && e.target.files[0];
@@ -1601,38 +1850,7 @@ function PersediaanTab({ items, itemTx, onStockIn, onDownload }) {
       </Card>
 
       <Card>
-        <div className="font-bold mb-4">Unduh Laporan Keluar Masuk Barang</div>
-        <div className="grid sm:grid-cols-2 gap-3">
-          <Field label="Modul">
-            <select className={inputCls} value={reportModule} onChange={(e) => setReportModule(e.target.value)}>
-              <option value="items">Barang Gudang</option>
-              <option value="medicines">Obat Klinik</option>
-            </select>
-          </Field>
-          <div className="grid grid-cols-2 gap-3">
-            <Field label="Dari Tanggal">
-              <input type="date" className={inputCls} value={start} onChange={(e) => setStart(e.target.value)} />
-            </Field>
-            <Field label="Sampai Tanggal">
-              <input type="date" className={inputCls} value={end} onChange={(e) => setEnd(e.target.value)} />
-            </Field>
-          </div>
-        </div>
-        <div className="flex gap-2 mt-4">
-          <button onClick={() => onDownload(reportModule, "pdf", start, end)}
-            className="flex-1 border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase hover:bg-neutral-50">
-            Unduh PDF
-          </button>
-          <button onClick={() => onDownload(reportModule, "xlsx", start, end)}
-            className="flex-1 border border-neutral-300 rounded-lg py-2 text-sm font-bold uppercase hover:bg-neutral-50">
-            Unduh Excel
-          </button>
-        </div>
-        <p className="text-xs text-neutral-400 mt-3">Laporan berisi total masuk, total keluar dalam periode, dan saldo stok saat ini untuk tiap barang.</p>
-      </Card>
-
-      <Card>
-        <div className="font-bold mb-3">Riwayat Barang Masuk / Keluar</div>
+        <div className="font-bold mb-3">Riwayat Barang Masuk</div>
         <div className="bg-white border border-neutral-200 rounded-2xl overflow-x-auto -mx-1">
           <table className="w-full text-sm min-w-[600px]">
             <thead>
@@ -1646,12 +1864,12 @@ function PersediaanTab({ items, itemTx, onStockIn, onDownload }) {
               </tr>
             </thead>
             <tbody>
-              {itemTx.map((h) => (
+              {itemTx.filter((h) => h.type === "masuk").map((h) => (
                 <tr key={h.id} className="border-b border-neutral-100 last:border-0">
                   <td className="p-3 text-xs text-neutral-500 whitespace-nowrap">{fmtDate(h.created_at)}</td>
                   <td className="p-3 font-semibold">{h.item_name}</td>
                   <td className="p-3">
-                    <span className={`text-xs font-bold uppercase px-2 py-1 rounded ${h.type === "masuk" ? "bg-green-100 text-green-800" : "bg-red-100 text-red-800"}`}>{h.type}</span>
+                    <span className="text-xs font-bold uppercase px-2 py-1 rounded bg-green-100 text-green-800">{h.type}</span>
                   </td>
                   <td className="p-3">{fmtNum(h.qty)} {h.unit}</td>
                   <td className="p-3 text-xs text-neutral-500">{h.note || "-"}</td>
@@ -1660,7 +1878,7 @@ function PersediaanTab({ items, itemTx, onStockIn, onDownload }) {
                   </td>
                 </tr>
               ))}
-              {itemTx.length === 0 && (
+              {itemTx.filter((h) => h.type === "masuk").length === 0 && (
                 <tr><td colSpan="6" className="p-3 text-sm text-neutral-400">Belum ada riwayat.</td></tr>
               )}
             </tbody>
